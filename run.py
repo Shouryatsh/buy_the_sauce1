@@ -26,6 +26,7 @@ import argparse
 import logging
 import sys
 import time
+import io
 
 import schedule
 
@@ -35,13 +36,23 @@ from trader import run_scan
 
 def _setup_logging(level: str) -> None:
     fmt = "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
+    # Wrap stdout with a UTF-8 TextIO wrapper so Unicode characters (box-drawing,
+    # checkmarks, etc.) render without causing encoding errors on Windows consoles
+    # that default to a legacy code page.
+    # Prefer reconfiguring the existing stdout (available on modern Python)
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        stream = sys.stdout
+    except Exception:
+        # Fallback: wrap the raw buffer into a UTF-8 text wrapper for handlers
+        stream = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    stream_handler = logging.StreamHandler(stream)
+    file_handler = logging.FileHandler(config.LOG_FILE, encoding="utf-8")
+
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format=fmt,
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler(config.LOG_FILE),
-        ],
+        handlers=[stream_handler, file_handler],
     )
 
 
