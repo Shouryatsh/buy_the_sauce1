@@ -1,0 +1,54 @@
+BUY-THE-SAUCE SCREENER
+  Date   : 2026-03-03  11:51:15
+  Source : SEC EDGAR (fundamentals)  +  Stooq + IBKR (prices)
+  Tickers: AAPL, MSFT, GOOGL, META, AMZN, NVDA, JPM, V, BRK-B, UNH, COST, HD, HIMS
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+  TABLE 1 — DIP DETECTOR  (sorted by dip score, best first)
+  Price source : Stooq + IBKR
+  Thresholds   : RSI < 35.0 | price > 5% below MA50 | below MA200 | 52wk bottom 25%
+════════════════════════════════════════════════════════════════════════════════════════════════════
+SYMBOL   SCORE    BAR         PRICE     MA50    MA200    RSI   52WK%   FUND  SRC           SIGNALS
+────────────────────────────────────────────────────────────────────────────────────────────────────
+HIMS     4/4     ████        15.64    17.72    34.71   28.9      2%   FAIL  IBKR          RSI=28.9 oversold | 11.7% below MA50 | 54.9% below MA200 | 52wk bottom 2% ◄ DIP (fund FAIL — manual call)
+V        2/4     ██░░       316.82   320.90   334.49   44.5     17%   PASS  IBKR          5.3% below MA200 | 52wk bottom 17%
+UNH      2/4     ██░░       287.93   283.56   324.09   45.9     15%   PASS  IBKR          11.2% below MA200 | 52wk bottom 15%
+AAPL     1/4     █░░░       263.11   268.56   266.66   46.7     80%   FAIL  IBKR          1.3% below MA200
+MSFT     1/4     █░░░       400.10   400.19   470.76   41.7     26%   PASS  IBKR          15.0% below MA200
+GOOGL    1/4     █░░░       300.81   314.02   302.48   36.8     78%   PASS  IBKR          0.6% below MA200
+META     1/4     █░░░       651.74   656.11   659.96   48.6     55%   PASS  IBKR          1.2% below MA200
+AMZN     1/4     █░░░       205.61   210.00   227.62   38.5     44%   FAIL  IBKR          9.7% below MA200
+NVDA     1/4     █░░░       179.59   185.25   186.03   43.7     76%   FAIL  IBKR          3.5% below MA200
+JPM      1/4     █░░░       297.00   307.75   309.13   40.9     70%   PASS  IBKR          3.9% below MA200
+BRK-B    1/4     █░░░       480.17   498.04   495.94   38.1     26%   FAIL  Stooq         3.2% below MA200
+HD       1/4     █░░░       363.03   381.63   368.19   38.9     37%   FAIL  IBKR          1.4% below MA200
+COST     0/4     ░░░░      1004.00   993.79   929.52   58.6     76%   FAIL  IBKR          —
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+  TABLE 2 — FUNDAMENTAL SCREEN
+  Thresholds: PE<60.0 | margin>5% | D/E<3.0 | FCF>0 | FCFyield>1.5% | ROE>10% | capex/FCF<75%
+════════════════════════════════════════════════════════════════════════════════════════════════════
+SYMBOL   STATUS        FCF   YIELD   MARGIN     D/E     ROE      PE  REASON / NOTES
+────────────────────────────────────────────────────────────────────────────────────────────────────
+AAPL     FAIL       $99.6B   2.50%    25.3%    6.1x    191%    41.0  D/E=6.08 > MAX=3.0 (non-financial)
+MSFT     PASS       $59.5B   1.99%    34.1%    1.2x     35%    41.3  All filters passed
+GOOGL    PASS       $69.5B   1.89%    26.1%    0.5x     29%    49.8  All filters passed
+META     PASS       $44.1B     N/A    29.0%    0.7x     31%     N/A  All filters passed
+AMZN     FAIL       $80.1B   3.68%     5.3%     N/A     21%    71.6  PE=71.6 > MAX_PE_RATIO=60.0
+NVDA     FAIL       $28.0B   0.64%   272.6%    1.5x    135%   147.7  PE=147.7 > MAX_PE_RATIO=60.0; FCF yield=0.64% < MIN=1.50%
+JPM      PASS       $13.0B   1.52%    31.3%   11.2x     15%    17.2  All filters passed
+V        PASS       $20.7B     N/A    52.9%    2.2x     69%     N/A  All filters passed
+BRK-B    FAIL       $29.8B     N/A    37.7%    0.8x     15%     N/A  FCF grew in fewer than 2 of last 3 year(s)
+UNH      PASS       $25.7B   9.75%     6.0%    6.9x     79%    11.8  All filters passed
+COST     FAIL        $6.7B   1.52%     2.6%    2.0x     27%    70.7  PE=70.7 > MAX_PE_RATIO=60.0; profitMargin=2.6% < MIN=5.0%; FCF grew in fewer than 2 of last 3 year(s)
+HD       FAIL       $11.5B   3.12%    10.9%   48.3x   1095%    21.6  D/E=48.33 > MAX=3.0 (non-financial); FCF grew in fewer than 2 of last 3 year(s)
+HIMS     FAIL        $0.1B     N/A    -2.7%    0.7x     -8%     N/A  profitMargin=-2.7% < MIN=5.0%; ROE=-7.6% < MIN=10.0%
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+  SUMMARY — 2026-03-03  11:51:15
+════════════════════════════════════════════════════════════════════════════════════════════════════
+  🟢 BUY SIGNAL  (dip ✅  +  fundamentals ✅) : None today
+  🟡 DIP ONLY    (dip ✅  +  fundamentals ❌) : HIMS  ← manual call
+────────────────────────────────────────────────────────────────────────────────────────────────────

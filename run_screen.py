@@ -158,8 +158,11 @@ def _parse_args():
 
 
 WATCHLIST = [
-    "AAPL","MSFT","GOOGL","META","AMZN","NVDA",
-    "JPM","V","BRK-B","UNH","COST","HD","HIMS",
+    "NVDA","TSLA","BAC","MSFT","XOM","TSM",
+    "AVGO","NOW","WFC","CSCO","SAP","PG","HIMS",
+    "RTX","MRK","UNH","IBM","AXP","V",
+    "JNJ","GE","PEP","HSBC","TMUS","MA",
+    "HD","NVS","ASML","TMO","COST","ISRG",
     # ← add new tickers here, one per line or comma-separated:
     # "TSLA","PLTR","RDDT",
 ]
