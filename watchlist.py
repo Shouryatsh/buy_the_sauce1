@@ -11,7 +11,7 @@ WATCHLIST: list[str] = [
     # Consumer Discretionary / Staples
     "AMZN", "COST", "WMT", "HD", "NKE", "SBUX", "MCD", "TGT",
     # Healthcare
-    "JNJ", "UNH", "PFE", "ABBV", "MRK", "TMO", "ABT",
+    "JNJ", "UNH", "PFE", "ABBV", "MRK", "TMO", "ABT", "HIMS",
     # Financials
     "JPM", "BAC", "WFC", "GS", "MS", "V", "MA", "AXP",
     # Energy

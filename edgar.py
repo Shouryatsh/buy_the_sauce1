@@ -129,11 +129,64 @@ def _safe(value) -> Optional[float]:
 # Price history via Stooq
 # ---------------------------------------------------------------------------
 
-def get_price_history(symbol: str, period_years: int = 2) -> Optional[pd.DataFrame]:
-    """Fetch daily OHLCV price history from Stooq (free, no API key).
+def _fetch_ibkr_history(symbol: str, period_years: int = 2) -> Optional[pd.DataFrame]:
+    """Fetch daily OHLCV history from IBKR TWS/Gateway via ib_insync.
 
-    Returns a DataFrame with columns [Open, High, Low, Close, Volume]
-    indexed by date (oldest first), or None on failure.
+    Requires TWS or IB Gateway to be running and logged in.
+    Returns a DataFrame (oldest-first) or None if TWS is not reachable.
+
+    Cost: $0 — included with any IBKR account.
+    Data: real-time / most recent close (much fresher than Stooq).
+    """
+    try:
+        from ib_insync import IB, Stock
+        import config
+
+        ib = IB()
+        ib.connect(config.IBKR_HOST, config.IBKR_PORT,
+                   clientId=config.IBKR_CLIENT_ID + 10,  # offset to avoid clashing with trader
+                   readonly=True, timeout=5)
+
+        contract = Stock(symbol.upper(), "SMART", "USD")
+        ib.qualifyContracts(contract)
+
+        duration = f"{period_years} Y"
+        bars = ib.reqHistoricalData(
+            contract,
+            endDateTime="",          # up to now
+            durationStr=duration,
+            barSizeSetting="1 day",
+            whatToShow="TRADES",
+            useRTH=True,             # regular trading hours only
+            formatDate=1,
+        )
+        ib.disconnect()
+
+        if not bars:
+            return None
+
+        df = pd.DataFrame([{
+            "Date":   b.date,
+            "Open":   b.open,
+            "High":   b.high,
+            "Low":    b.low,
+            "Close":  b.close,
+            "Volume": b.volume,
+        } for b in bars])
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.set_index("Date").sort_index()
+        logger.info("%s: fetched %d price bars from IBKR (live)", symbol, len(df))
+        return df
+
+    except Exception as exc:
+        logger.debug("%s: IBKR price fetch failed (TWS not running?) — %s", symbol, exc)
+        return None
+
+
+def _fetch_stooq_history(symbol: str, period_years: int = 2) -> Optional[pd.DataFrame]:
+    """Fetch daily OHLCV history from Stooq (free, no API key, end-of-day).
+
+    Used as fallback when TWS/Gateway is not running.
     """
     try:
         from pandas_datareader import data as pdr
@@ -143,11 +196,28 @@ def get_price_history(symbol: str, period_years: int = 2) -> Optional[pd.DataFra
         if df.empty:
             raise ValueError("empty response")
         df = df.sort_index()   # Stooq returns newest-first; flip to oldest-first
-        logger.info("%s: fetched %d price bars from Stooq", symbol, len(df))
+        logger.info("%s: fetched %d price bars from Stooq (EOD fallback)", symbol, len(df))
         return df
     except Exception as exc:
         logger.warning("%s: Stooq price fetch failed — %s", symbol, exc)
         return None
+
+
+def get_price_history(symbol: str, period_years: int = 2) -> Optional[pd.DataFrame]:
+    """Fetch daily OHLCV price history.
+
+    Strategy (automatic fallback):
+      1. IBKR TWS/Gateway  — real-time, free, requires TWS running locally
+      2. Stooq             — end-of-day, free, no setup needed
+
+    Returns a tuple: (DataFrame | None, source_str)
+      - DataFrame has columns [Open, High, Low, Close, Volume], oldest-first index
+      - source_str is "IBKR (live)" or "Stooq (EOD)" — shown in the output table
+    """
+    df = _fetch_ibkr_history(symbol, period_years)
+    if df is not None and not df.empty:
+        return df, "IBKR (live)"
+    return _fetch_stooq_history(symbol, period_years), "Stooq (EOD)"
 
 
 # ---------------------------------------------------------------------------
