@@ -1,36 +1,37 @@
 """
-screener.py — Fundamental quality filter using yfinance data.
+screener.py — Fundamental quality filter using SEC EDGAR data.
 
 Applies the thresholds defined in config.py to eliminate stocks that do
 not meet baseline quality criteria before dip-detection is run.  This
 keeps the buy-the-dip signals focused on fundamentally sound companies.
 
+Data source: SEC EDGAR XBRL API via edgar.py (no API key, free, official).
+Price history for market-cap / P/E: Stooq via pandas_datareader.
+
 Criteria checked
 ----------------
-1. Forward P/E          : MIN_PE_RATIO < forwardPE (or trailingPE) ≤ MAX_PE_RATIO
+1. Trailing P/E         : MIN_PE_RATIO < trailingPE ≤ MAX_PE_RATIO
 2. Profit margin        : profitMargins ≥ MIN_PROFIT_MARGIN
 3. Debt / equity        : debtToEquity / 100 ≤ MAX_DEBT_TO_EQUITY
-                          (yfinance reports D/E as a percentage, e.g. 150 = 1.5×)
 4. Free cash flow       : freeCashflow > MIN_FREE_CASH_FLOW  (must be positive)
 5. FCF yield            : freeCashflow / marketCap ≥ MIN_FCF_YIELD  (≥ 2%)
-6. Increasing FCF       : latest FCF > prior-year FCF  (via cash-flow statement)
-                          checked over FCF_GROWTH_LOOKBACK_YEARS years
+6. Increasing FCF       : annual FCF trend increasing over FCF_GROWTH_LOOKBACK_YEARS
 7. Return on equity     : returnOnEquity ≥ MIN_RETURN_ON_EQUITY  (≥ 10%)
 8. Capex-to-FCF ratio   : |capitalExpenditures| / freeCashflow ≤ MAX_CAPEX_TO_FCF
 
-Any metric that is unavailable (None / NaN) is treated as a warning
-and the stock is retained (benefit of the doubt) so that data gaps
-don't silently drop good companies.
+Any metric that is unavailable (None) is treated with benefit of the doubt
+so that EDGAR data gaps don't silently drop good companies.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
-
-import yfinance as yf
+from typing import Optional
 
 import config
+import edgar
 
 logger = logging.getLogger(__name__)
 
@@ -42,71 +43,43 @@ logger = logging.getLogger(__name__)
 @dataclass
 class FundamentalProfile:
     symbol: str
-    pe_ratio: float | None = None
-    profit_margin: float | None = None
-    debt_to_equity: float | None = None   # normalised (not ×100)
-    free_cash_flow: float | None = None   # absolute FCF in reporting currency
-    fcf_yield: float | None = None        # FCF / market cap
-    fcf_increasing: bool | None = None    # True if FCF trended up over lookback
-    return_on_equity: float | None = None
-    capex_to_fcf: float | None = None
+    pe_ratio: Optional[float] = None
+    profit_margin: Optional[float] = None
+    debt_to_equity: Optional[float] = None   # normalised (not ×100)
+    free_cash_flow: Optional[float] = None   # absolute FCF in USD
+    fcf_yield: Optional[float] = None        # FCF / market cap
+    fcf_increasing: Optional[bool] = None    # True if FCF trended up over lookback
+    return_on_equity: Optional[float] = None
+    capex_to_fcf: Optional[float] = None
     passes: bool = True
-    fail_reasons: list[str] = field(default_factory=list)
+    fail_reasons: list = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _safe_float(value) -> float | None:
+def _safe_float(value) -> Optional[float]:
     """Return float or None, silently swallowing conversion errors."""
     try:
         v = float(value)
-        import math
         return None if math.isnan(v) else v
     except (TypeError, ValueError):
         return None
 
 
-def _check_fcf_increasing(ticker: yf.Ticker, lookback: int) -> bool | None:
-    """Return True if FCF has been growing over *lookback* annual periods.
+def _check_fcf_increasing(fcf_history: list, lookback: int) -> Optional[bool]:
+    """Return True if FCF grew every year over *lookback* consecutive periods.
 
-    Uses the cash-flow statement (annual) from yfinance.  Returns None when
-    there is insufficient history to make a determination.
+    *fcf_history* is ordered newest → oldest (as returned by edgar.py).
+    Returns None when there is insufficient history.
     """
-    try:
-        cf = ticker.cashflow          # columns = fiscal-year end dates (newest first)
-        if cf is None or cf.empty:
-            return None
-
-        # Row label varies by yfinance version
-        for label in ("Free Cash Flow", "FreeCashFlow"):
-            if label in cf.index:
-                fcf_series = cf.loc[label].dropna()
-                break
-        else:
-            # Construct FCF manually: Operating CF − Capex
-            op_label = next(
-                (l for l in cf.index if "Operating" in l and "Cash" in l), None
-            )
-            cx_label = next(
-                (l for l in cf.index if "Capital" in l and "Expenditure" in l), None
-            )
-            if op_label is None or cx_label is None:
-                return None
-            fcf_series = (cf.loc[op_label] - cf.loc[cx_label].abs()).dropna()
-
-        if len(fcf_series) < 2:
-            return None
-
-        # Take up to (lookback + 1) data points so we can compare 'lookback' pairs
-        fcf_values = fcf_series.iloc[: lookback + 1].tolist()   # newest → oldest
-        # Check every consecutive pair: newer > older
-        return all(fcf_values[i] > fcf_values[i + 1] for i in range(len(fcf_values) - 1))
-
-    except Exception as exc:
-        logger.debug("FCF trend check failed: %s", exc)
+    if not fcf_history or len(fcf_history) < 2:
         return None
+    values = fcf_history[: lookback + 1]   # take up to lookback+1 points
+    if len(values) < 2:
+        return None
+    return all(values[i] > values[i + 1] for i in range(len(values) - 1))
 
 
 # ---------------------------------------------------------------------------
@@ -115,8 +88,9 @@ def _check_fcf_increasing(ticker: yf.Ticker, lookback: int) -> bool | None:
 
 def screen_fundamental(
     symbol: str,
-    info: dict | None = None,
-    _ticker: yf.Ticker | None = None,
+    info: Optional[dict] = None,
+    # _ticker kept for test compatibility (ignored in production)
+    _ticker=None,
 ) -> FundamentalProfile:
     """Return a FundamentalProfile indicating whether the stock passes the
     fundamental quality filter.
@@ -126,21 +100,11 @@ def screen_fundamental(
     symbol:
         Ticker symbol.
     info:
-        Pre-fetched ``yf.Ticker(symbol).info`` dict.  If None, fetched
-        automatically (useful in production; pass explicitly in tests to
-        avoid network calls).
-    _ticker:
-        Pre-built ``yf.Ticker`` object.  Only used internally / in tests to
-        inject a mock; ignored when *info* is also provided from a mock.
+        Pre-fetched fundamentals dict (from edgar.get_fundamentals or a test
+        mock).  If None, fetched automatically from SEC EDGAR.
     """
-    ticker = _ticker or yf.Ticker(symbol)
-
     if info is None:
-        try:
-            info = ticker.info
-        except Exception as exc:
-            logger.warning("%s: could not fetch info — %s", symbol, exc)
-            info = {}
+        info = edgar.get_fundamentals(symbol)
 
     profile = FundamentalProfile(symbol=symbol)
 
@@ -151,7 +115,7 @@ def screen_fundamental(
         if pe <= config.MIN_PE_RATIO:
             profile.passes = False
             profile.fail_reasons.append(
-                f"PE={pe:.1f} ≤ MIN_PE_RATIO={config.MIN_PE_RATIO}"
+                f"PE={pe:.1f} <= MIN_PE_RATIO={config.MIN_PE_RATIO}"
             )
         elif pe > config.MAX_PE_RATIO:
             profile.passes = False
@@ -172,7 +136,7 @@ def screen_fundamental(
     # --- 3. Debt / equity ---
     de_raw = _safe_float(info.get("debtToEquity"))
     if de_raw is not None:
-        profile.debt_to_equity = de_raw / 100.0          # yfinance gives percentage
+        profile.debt_to_equity = de_raw / 100.0
         if profile.debt_to_equity > config.MAX_DEBT_TO_EQUITY:
             profile.passes = False
             profile.fail_reasons.append(
@@ -186,10 +150,10 @@ def screen_fundamental(
         if fcf <= config.MIN_FREE_CASH_FLOW:
             profile.passes = False
             profile.fail_reasons.append(
-                f"FCF={fcf:,.0f} ≤ MIN={config.MIN_FREE_CASH_FLOW:,.0f} (negative/zero)"
+                f"FCF={fcf:,.0f} <= MIN={config.MIN_FREE_CASH_FLOW:,.0f} (negative/zero)"
             )
 
-    # --- 5. FCF yield ≥ 2% ---
+    # --- 5. FCF yield >= 2% ---
     market_cap = _safe_float(info.get("marketCap"))
     if fcf is not None and market_cap and market_cap > 0:
         profile.fcf_yield = fcf / market_cap
@@ -201,17 +165,18 @@ def screen_fundamental(
     elif fcf is not None:
         logger.debug("%s: marketCap unavailable — skipping FCF yield check", symbol)
 
-    # --- 6. FCF must be increasing (YoY trend) ---
+    # --- 6. FCF must be increasing (YoY trend from EDGAR history) ---
     if config.REQUIRE_INCREASING_FCF:
-        fcf_increasing = _check_fcf_increasing(ticker, config.FCF_GROWTH_LOOKBACK_YEARS)
+        fcf_history = info.get("_fcf_history", [])
+        fcf_increasing = _check_fcf_increasing(fcf_history, config.FCF_GROWTH_LOOKBACK_YEARS)
         profile.fcf_increasing = fcf_increasing
-        if fcf_increasing is False:          # None = data gap → benefit of the doubt
+        if fcf_increasing is False:   # None = insufficient data → benefit of the doubt
             profile.passes = False
             profile.fail_reasons.append(
                 f"FCF not increasing over last {config.FCF_GROWTH_LOOKBACK_YEARS} year(s)"
             )
 
-    # --- 7. Return on equity ≥ 10% ---
+    # --- 7. Return on equity >= 10% ---
     roe = _safe_float(info.get("returnOnEquity"))
     if roe is not None:
         profile.return_on_equity = roe
@@ -221,10 +186,9 @@ def screen_fundamental(
                 f"ROE={roe:.1%} < MIN={config.MIN_RETURN_ON_EQUITY:.1%}"
             )
 
-    # --- 8. Capex-to-FCF ≤ 50% ---
+    # --- 8. Capex-to-FCF <= 50% ---
     capex_raw = _safe_float(info.get("capitalExpenditures"))
     if capex_raw is not None and fcf is not None and fcf > 0:
-        # yfinance reports capex as a negative number; take absolute value
         capex = abs(capex_raw)
         profile.capex_to_fcf = capex / fcf
         if profile.capex_to_fcf > config.MAX_CAPEX_TO_FCF:

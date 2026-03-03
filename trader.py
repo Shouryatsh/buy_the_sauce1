@@ -4,11 +4,11 @@ trader.py — Orchestrates the full pipeline for one scan cycle.
 Pipeline
 --------
 1. For each ticker in the watchlist:
-   a. Fetch fundamental data (yfinance).
+   a. Fetch fundamental data (SEC EDGAR via edgar.py).
    b. Apply fundamental quality screen (screener.py).
-   c. Fetch 1-year price history (yfinance).
+   c. Fetch price history (Stooq via edgar.py).
    d. Score for dip signals (dip_detector.py).
-   e. If score ≥ MIN_DIP_SCORE → candidate for buying.
+   e. If score >= MIN_DIP_SCORE -> candidate for buying.
 2. For each dip candidate:
    a. Calculate order parameters (risk_manager.py).
    b. Place bracket order via IBKR (broker.py).
@@ -23,9 +23,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-import yfinance as yf
-
 import config
+import edgar
 from broker import IBKRBroker
 from dip_detector import DipSignal, score_dip
 from risk_manager import OrderSpec, calculate_order
@@ -40,19 +39,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _fetch_info(symbol: str) -> dict:
+    """Fetch fundamentals from SEC EDGAR (free, no API key)."""
     try:
-        return yf.Ticker(symbol).info or {}
+        return edgar.get_fundamentals(symbol)
     except Exception as exc:
-        logger.warning("%s: info fetch failed — %s", symbol, exc)
+        logger.warning("%s: EDGAR fetch failed — %s", symbol, exc)
         return {}
 
 
-def _fetch_history(symbol: str, period: str = "1y"):
+def _fetch_history(symbol: str, period_years: int = 2):
+    """Fetch price history from Stooq (free, no API key)."""
     try:
-        hist = yf.Ticker(symbol).history(period=period)
+        hist = edgar.get_price_history(symbol, period_years=period_years)
+        if hist is None or hist.empty:
+            raise ValueError("empty price history")
         return hist
     except Exception as exc:
-        logger.warning("%s: history fetch failed — %s", symbol, exc)
+        logger.warning("%s: price history fetch failed — %s", symbol, exc)
         return None
 
 
@@ -60,14 +63,14 @@ def _fetch_history(symbol: str, period: str = "1y"):
 # Single-stock evaluation
 # ---------------------------------------------------------------------------
 
-def evaluate_symbol(symbol: str) -> tuple[Optional[FundamentalProfile], Optional[DipSignal]]:
+def evaluate_symbol(symbol: str) -> tuple:
     """Run the full evaluation for one ticker.
 
     Returns
     -------
     (FundamentalProfile, DipSignal) — either may be None on data failure.
     """
-    logger.info("── Evaluating %s ──", symbol)
+    logger.info("-- Evaluating %s --", symbol)
 
     info = _fetch_info(symbol)
     fundamental = screen_fundamental(symbol, info=info)
@@ -77,6 +80,10 @@ def evaluate_symbol(symbol: str) -> tuple[Optional[FundamentalProfile], Optional
         return fundamental, None
 
     history = _fetch_history(symbol)
+    if history is None:
+        logger.warning("%s: no price history — skipping dip detection", symbol)
+        return fundamental, None
+
     dip = score_dip(symbol, history)
     return fundamental, dip
 
@@ -85,7 +92,7 @@ def evaluate_symbol(symbol: str) -> tuple[Optional[FundamentalProfile], Optional
 # Full scan
 # ---------------------------------------------------------------------------
 
-def run_scan(dry_run: bool = False) -> list[OrderSpec]:
+def run_scan(dry_run: bool = False) -> list:
     """Scan all watchlist tickers and optionally place orders.
 
     Parameters
@@ -101,12 +108,12 @@ def run_scan(dry_run: bool = False) -> list[OrderSpec]:
     logger.info("=== Starting scan — %d tickers, dry_run=%s ===", len(WATCHLIST), dry_run)
 
     # Collect dip candidates
-    candidates: list[DipSignal] = []
+    candidates: list = []
     for symbol in WATCHLIST:
         _, dip = evaluate_symbol(symbol)
         if dip is not None and dip.is_dip:
             candidates.append(dip)
-            logger.info("%s: ✓ DIP CANDIDATE (score=%d)", symbol, dip.score)
+            logger.info("%s: DIP CANDIDATE (score=%d)", symbol, dip.score)
 
     logger.info("=== %d dip candidate(s) found ===", len(candidates))
 
@@ -115,7 +122,6 @@ def run_scan(dry_run: bool = False) -> list[OrderSpec]:
         return []
 
     if dry_run:
-        # Build order specs with a placeholder equity for sizing preview
         PLACEHOLDER_EQUITY = 100_000.0
         specs = []
         for dip in candidates:
@@ -131,7 +137,7 @@ def run_scan(dry_run: bool = False) -> list[OrderSpec]:
         return specs
 
     # --- Live execution ---
-    submitted: list[OrderSpec] = []
+    submitted: list = []
     with IBKRBroker() as broker:
         equity = broker.get_account_equity()
         positions = broker.get_open_positions()
@@ -151,7 +157,7 @@ def run_scan(dry_run: bool = False) -> list[OrderSpec]:
             trades = broker.place_bracket_order(spec)
             if trades:
                 submitted.append(spec)
-                open_count += 1  # optimistically increment
+                open_count += 1
 
     logger.info("=== Scan complete — %d order(s) submitted ===", len(submitted))
     return submitted
