@@ -140,7 +140,7 @@ def _next_open_str() -> str:
 
 def _parse_args():
     parser = argparse.ArgumentParser(
-        description="Buy-the-sauce screener — single run or market-hours loop"
+        description="Buy-the-sauce screener — single run, market-hours loop, or back-test"
     )
     parser.add_argument(
         "--loop",
@@ -153,6 +153,35 @@ def _parse_args():
         default=15,
         metavar="MINUTES",
         help="Minutes between scans in --loop mode (default: 15, minimum enforced: 10)",
+    )
+    # ── back-test flags ───────────────────────────────────────────────────────
+    parser.add_argument(
+        "--backtest",
+        action="store_true",
+        help="Run a historical back-test of the dip-buying strategy instead of a live screen",
+    )
+    parser.add_argument(
+        "--years",
+        type=int,
+        default=3,
+        metavar="N",
+        help="Number of years of price history to use in back-test mode (default: 3)",
+    )
+    parser.add_argument(
+        "--min-score",
+        type=int,
+        default=config.MIN_DIP_SCORE,
+        dest="min_score",
+        metavar="N",
+        help=f"Minimum dip score to trigger a simulated entry in back-test mode (default: {config.MIN_DIP_SCORE})",
+    )
+    parser.add_argument(
+        "--fundamentals",
+        action="store_true",
+        help=(
+            "Back-test mode: also apply the fundamental screen and show a "
+            "side-by-side comparison of dip-only vs dip+fundamentals performance."
+        ),
     )
     return parser.parse_args()
 
@@ -397,6 +426,17 @@ def run_screen() -> None:
 def main() -> None:
     args     = _parse_args()
     interval = max(10, args.interval)   # enforce 10-minute minimum — safety floor
+
+    # ── back-test mode ────────────────────────────────────────────────────────
+    if args.backtest:
+        from backtest import run_backtest
+        run_backtest(
+            watchlist=WATCHLIST,
+            years=args.years,
+            min_score=args.min_score,
+            use_fundamentals=getattr(args, "fundamentals", False),
+        )
+        return
 
     if not args.loop:
         # Single run — no market-hours check (user asked for it explicitly)
