@@ -68,18 +68,25 @@ def _safe_float(value) -> Optional[float]:
         return None
 
 
-def _check_fcf_increasing(fcf_history: list, lookback: int) -> Optional[bool]:
-    """Return True if FCF grew every year over *lookback* consecutive periods.
+def _check_fcf_increasing(fcf_history: list, lookback: int, min_growth_years: int) -> Optional[bool]:
+    """Return True if FCF grew in at least *min_growth_years* of the last *lookback* periods.
+
+    This is softer than requiring every single year to grow — it tolerates
+    one-off capex spikes or a single bad year while still requiring an
+    overall upward trend.
 
     *fcf_history* is ordered newest → oldest (as returned by edgar.py).
-    Returns None when there is insufficient history.
+    Returns None when there is insufficient history (benefit of the doubt).
     """
     if not fcf_history or len(fcf_history) < 2:
         return None
-    values = fcf_history[: lookback + 1]   # take up to lookback+1 points
+    values = fcf_history[: lookback + 1]   # up to lookback+1 points → lookback pairs
     if len(values) < 2:
         return None
-    return all(values[i] > values[i + 1] for i in range(len(values) - 1))
+    growth_years = sum(1 for i in range(len(values) - 1) if values[i] > values[i + 1])
+    available_pairs = len(values) - 1
+    required = min(min_growth_years, available_pairs)  # don't require more than available
+    return growth_years >= required
 
 
 # ---------------------------------------------------------------------------
@@ -133,14 +140,20 @@ def screen_fundamental(
                 f"profitMargin={margin:.1%} < MIN={config.MIN_PROFIT_MARGIN:.1%}"
             )
 
-    # --- 3. Debt / equity ---
+    # --- 3. Debt / equity (sector-aware) ---
     de_raw = _safe_float(info.get("debtToEquity"))
     if de_raw is not None:
         profile.debt_to_equity = de_raw / 100.0
-        if profile.debt_to_equity > config.MAX_DEBT_TO_EQUITY:
+        # Use a higher cap for financial companies (banks, insurers) — their leverage
+        # is structural and regulated, not a sign of distress.
+        sic = str(info.get("_sic", "") or "")
+        is_financial = any(sic.startswith(p) for p in config.FINANCIAL_SIC_PREFIXES)
+        de_cap = config.MAX_DEBT_TO_EQUITY_FINANCIAL if is_financial else config.MAX_DEBT_TO_EQUITY
+        if profile.debt_to_equity > de_cap:
             profile.passes = False
             profile.fail_reasons.append(
-                f"D/E={profile.debt_to_equity:.2f} > MAX={config.MAX_DEBT_TO_EQUITY}"
+                f"D/E={profile.debt_to_equity:.2f} > MAX={de_cap} "
+                f"({'financial' if is_financial else 'non-financial'})"
             )
 
     # --- 4. Free cash flow — must be positive ---
@@ -165,15 +178,20 @@ def screen_fundamental(
     elif fcf is not None:
         logger.debug("%s: marketCap unavailable — skipping FCF yield check", symbol)
 
-    # --- 6. FCF must be increasing (YoY trend from EDGAR history) ---
+    # --- 6. FCF must be increasing in at least FCF_MIN_GROWTH_YEARS of lookback ---
     if config.REQUIRE_INCREASING_FCF:
         fcf_history = info.get("_fcf_history", [])
-        fcf_increasing = _check_fcf_increasing(fcf_history, config.FCF_GROWTH_LOOKBACK_YEARS)
+        fcf_increasing = _check_fcf_increasing(
+            fcf_history,
+            config.FCF_GROWTH_LOOKBACK_YEARS,
+            config.FCF_MIN_GROWTH_YEARS,
+        )
         profile.fcf_increasing = fcf_increasing
         if fcf_increasing is False:   # None = insufficient data → benefit of the doubt
             profile.passes = False
             profile.fail_reasons.append(
-                f"FCF not increasing over last {config.FCF_GROWTH_LOOKBACK_YEARS} year(s)"
+                f"FCF grew in fewer than {config.FCF_MIN_GROWTH_YEARS} of last "
+                f"{config.FCF_GROWTH_LOOKBACK_YEARS} year(s)"
             )
 
     # --- 7. Return on equity >= 10% ---

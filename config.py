@@ -35,23 +35,35 @@ MIN_DIP_SCORE: int = 3             # Minimum combined score to trigger buy consi
 # ---------------------------------------------------------------------------
 # Fundamental filters
 # ---------------------------------------------------------------------------
-MAX_PE_RATIO: float = 60.0         # Skip if forward P/E > this
+MAX_PE_RATIO: float = 60.0         # Skip if trailing P/E > this
 MIN_PE_RATIO: float = 0.0          # Skip unprofitable (negative EPS)
-MAX_DEBT_TO_EQUITY: float = 2.5    # Skip if D/E ratio > this
 MIN_PROFIT_MARGIN: float = 0.05    # Skip if net margin < 5%
 
-# --- Free Cash Flow filters (primary quality gate) ---
-MIN_FREE_CASH_FLOW: float = 0.0    # FCF must be strictly positive (no cash-burning businesses)
-MIN_FCF_YIELD: float = 0.02        # FCF yield (FCF / market cap) must be ≥ 2%
-REQUIRE_INCREASING_FCF: bool = True # FCF must have grown YoY (latest vs. prior year)
-FCF_GROWTH_LOOKBACK_YEARS: int = 3  # Number of prior years used to confirm FCF trend
+# --- Debt / equity (sector-aware) ---
+# Banks and financials carry structural leverage that is normal and regulated;
+# applying a single D/E cap eliminates them unfairly.  We use a higher cap for
+# financials and a tighter one for all other sectors.
+MAX_DEBT_TO_EQUITY: float = 3.0           # Non-financial stocks (e.g. AAPL, UNH)
+MAX_DEBT_TO_EQUITY_FINANCIAL: float = 15.0 # Banks, insurers, diversified financials
+# SIC codes considered "financial" for the purpose of the looser D/E cap:
+FINANCIAL_SIC_PREFIXES: tuple = ("60", "61", "62", "63", "64", "67")
 
-# NOTE: MIN_REVENUE_GROWTH removed — revenue can grow while FCF collapses (e.g. heavy capex
-# or working-capital burn). FCF is a truer measure of business quality and shareholder value.
+# --- Free Cash Flow filters (primary quality gate) ---
+MIN_FREE_CASH_FLOW: float = 0.0    # FCF must be strictly positive
+MIN_FCF_YIELD: float = 0.015       # FCF yield ≥ 1.5% (2% excluded all mega-caps unfairly)
+REQUIRE_INCREASING_FCF: bool = True
+# Require FCF to be higher in at least FCF_GROWTH_LOOKBACK_YEARS out of the last 3 years
+# (not necessarily every single year — avoids penalising one-off capex spikes)
+FCF_GROWTH_LOOKBACK_YEARS: int = 3  # look back this many annual periods
+FCF_MIN_GROWTH_YEARS: int = 2       # FCF must be up in at least this many of those periods
+
+# NOTE: MIN_REVENUE_GROWTH removed — FCF is a truer measure of business quality.
 
 # --- Capital efficiency filters ---
-MIN_RETURN_ON_EQUITY: float = 0.10  # ROE must be ≥ 10% (screens for compounders)
-MAX_CAPEX_TO_FCF: float = 0.50      # Capex must be ≤ 50% of FCF (avoids capex-heavy traps)
+MIN_RETURN_ON_EQUITY: float = 0.10  # ROE ≥ 10%
+MAX_CAPEX_TO_FCF: float = 0.75      # Capex ≤ 75% of FCF
+#   Raised from 50% → 75%: 50% was too tight for asset-heavy compounders
+#   (BRK-B railroads, META AI infra).  75% still screens out cash-incinerators.
 
 # ---------------------------------------------------------------------------
 # Logging
