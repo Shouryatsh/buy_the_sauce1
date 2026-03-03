@@ -48,11 +48,15 @@ def _fetch_info(symbol: str) -> dict:
 
 
 def _fetch_history(symbol: str, period_years: int = 2):
-    """Fetch price history from Stooq (free, no API key)."""
+    """Fetch price history (IBKR if available, else Stooq).
+
+    Returns the DataFrame only; source label is logged automatically by edgar.py.
+    """
     try:
-        hist = edgar.get_price_history(symbol, period_years=period_years)
+        hist, source = edgar.get_price_history(symbol, period_years=period_years)
         if hist is None or hist.empty:
             raise ValueError("empty price history")
+        logger.info("%s: price history source = %s", symbol, source)
         return hist
     except Exception as exc:
         logger.warning("%s: price history fetch failed — %s", symbol, exc)
