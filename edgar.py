@@ -163,35 +163,76 @@ def _fetch_price_from_ibkr(symbol: str, period_years: int = 2) -> Optional[pd.Da
         return None
 
 
-def get_price_history(symbol: str, period_years: int = 2) -> tuple[Optional[pd.DataFrame], str]:
-    """Fetch daily OHLCV price history.  Tries IBKR first, falls back to Stooq.
+def _fetch_price_from_yfinance(symbol: str, period_years: int = 2) -> Optional[pd.DataFrame]:
+    """Fetch price history via yfinance (Yahoo Finance).  Always available, no key needed."""
+    try:
+        import yfinance as yf
+        period_str = f"{period_years}y"
+        t  = yf.Ticker(symbol.upper())
+        df = t.history(period=period_str, auto_adjust=True)
+        if df is None or df.empty:
+            return None
+        # Normalise: strip timezone, keep only OHLCV columns, sort oldest-first
+        df.index = df.index.tz_localize(None) if df.index.tzinfo else df.index
+        df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+        df = df.sort_index()
+        logger.info("%s: fetched %d price bars from yfinance", symbol, len(df))
+        return df
+    except Exception as exc:
+        logger.warning("%s: yfinance price fetch failed — %s", symbol, exc)
+        return None
 
-    Returns
-    -------
-    (DataFrame, source_label)
-        DataFrame has columns [Open, High, Low, Close, Volume], indexed by date
-        (oldest first).  source_label is "IBKR" or "Stooq".
-        On complete failure returns (None, "unavailable").
-    """
-    # --- Try IBKR first (live data, only works when TWS/Gateway is running) ---
-    df = _fetch_price_from_ibkr(symbol, period_years=period_years)
-    if df is not None and not df.empty:
-        return df, "IBKR"
 
-    # --- Fall back to Stooq (free, always available) ---
+def _fetch_price_from_stooq(symbol: str, period_years: int = 2) -> Optional[pd.DataFrame]:
+    """Fetch price history from Stooq via pandas_datareader (secondary free fallback)."""
     try:
         from pandas_datareader import data as pdr
         end   = pd.Timestamp.today()
         start = end - pd.DateOffset(years=period_years)
         df = pdr.DataReader(symbol.upper(), "stooq", start=start, end=end)
-        if df.empty:
-            raise ValueError("empty response")
+        if df is None or df.empty:
+            return None
         df = df.sort_index()   # Stooq returns newest-first; flip to oldest-first
         logger.info("%s: fetched %d price bars from Stooq", symbol, len(df))
-        return df, "Stooq"
+        return df
     except Exception as exc:
         logger.warning("%s: Stooq price fetch failed — %s", symbol, exc)
-        return None, "unavailable"
+        return None
+
+
+def get_price_history(symbol: str, period_years: int = 2) -> tuple[Optional[pd.DataFrame], str]:
+    """Fetch daily OHLCV price history.
+
+    Priority
+    --------
+    1. IBKR TWS/Gateway  (live, only if running)
+    2. yfinance / Yahoo Finance  (always available, free)
+    3. Stooq via pandas_datareader  (fallback; subject to daily rate limits)
+
+    Returns
+    -------
+    (DataFrame, source_label)
+        DataFrame has columns [Open, High, Low, Close, Volume], indexed by date
+        (oldest first).  source_label is "IBKR", "yfinance", "Stooq", or "unavailable".
+        On complete failure returns (None, "unavailable").
+    """
+    # 1 — IBKR (live, best quality)
+    df = _fetch_price_from_ibkr(symbol, period_years=period_years)
+    if df is not None and not df.empty:
+        return df, "IBKR"
+
+    # 2 — yfinance (Yahoo Finance — always available, no rate limit issues)
+    df = _fetch_price_from_yfinance(symbol, period_years=period_years)
+    if df is not None and not df.empty:
+        return df, "yfinance"
+
+    # 3 — Stooq (secondary fallback — may hit daily hits limit)
+    df = _fetch_price_from_stooq(symbol, period_years=period_years)
+    if df is not None and not df.empty:
+        return df, "Stooq"
+
+    logger.warning("%s: all price sources failed — returning unavailable", symbol)
+    return None, "unavailable"
 
 
 # ---------------------------------------------------------------------------

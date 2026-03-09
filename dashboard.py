@@ -1145,7 +1145,7 @@ def tick_clock(_, current_label):
 
 def _parse_args():
     parser = argparse.ArgumentParser(description="Buy-the-sauce live dashboard")
-    parser.add_argument("--port", type=int, default=8050)
+    parser.add_argument("--port", type=int, default=8051)
     parser.add_argument("--no-browser", action="store_true")
     return parser.parse_args()
 

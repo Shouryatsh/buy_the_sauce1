@@ -1,0 +1,90 @@
+BUY-THE-SAUCE SCREENER
+  Date   : 2026-03-09  12:27:52
+  Source : SEC EDGAR (fundamentals)  +  IBKR (prices)
+  Tickers: NVDA, TSLA, BAC, MSFT, XOM, TSM, AVGO, NOW, WFC, CSCO, SAP, PG, HIMS, RTX, MRK, UNH, IBM, AXP, V, JNJ, GE, PEP, HSBC, TMUS, MA, HD, NVS, ASML, TMO, COST, ISRG
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+  TABLE 1 — DIP DETECTOR  (sorted by dip score, best first)
+  Price source : IBKR
+  Thresholds   : RSI < 35.0 | price > 5% below MA50 | below MA200 | 52wk bottom 25%
+════════════════════════════════════════════════════════════════════════════════════════════════════
+SYMBOL   SCORE    BAR         PRICE     MA50    MA200    RSI   52WK%   FUND  SRC           SIGNALS
+────────────────────────────────────────────────────────────────────────────────────────────────────
+HD       4/4     ████       347.63   376.85   367.53   30.9     20%   FAIL  IBKR          RSI=30.9 oversold | 7.8% below MA50 | 5.4% below MA200 | 52wk bottom 20% ◄ DIP (fund FAIL — manual call)
+BAC      3/4     ███░        47.23    51.42    52.79   29.7     58%   FAIL  IBKR          RSI=29.7 oversold | 8.2% below MA50 | 10.5% below MA200 ◄ DIP (fund FAIL — manual call)
+WFC      3/4     ███░        77.59    85.72    87.94   30.5     49%   PASS  IBKR          RSI=30.5 oversold | 9.5% below MA50 | 11.8% below MA200 ◄◄ BUY SIGNAL (fund PASS)
+AXP      3/4     ███░       298.46   329.15   355.77   28.9     45%   PASS  IBKR          RSI=28.9 oversold | 9.3% below MA50 | 16.1% below MA200 ◄◄ BUY SIGNAL (fund PASS)
+NOW      2/4     ██░░       123.44   108.81   147.58   60.7     21%   FAIL  IBKR          16.4% below MA200 | 52wk bottom 21%
+SAP      2/4     ██░░       199.78   201.51   235.65   43.8      4%   PASS  IBKR          15.2% below MA200 | 52wk bottom 4%
+HIMS     2/4     ██░░        22.14    16.42    33.16   59.0     15%   FAIL  IBKR          33.2% below MA200 | 52wk bottom 15%
+UNH      2/4     ██░░       282.67   283.76   318.74   43.9     14%   PASS  IBKR          11.3% below MA200 | 52wk bottom 14%
+V        2/4     ██░░       312.46   318.76   333.43   39.6     10%   PASS  IBKR          6.3% below MA200 | 52wk bottom 10%
+TMO      2/4     ██░░       500.46   515.36   567.85   32.3     44%   PASS  IBKR          RSI=32.3 oversold | 11.9% below MA200
+NVDA     1/4     █░░░       179.59   185.87   185.74   44.5     76%   FAIL  IBKR          3.3% below MA200
+TSLA     1/4     █░░░       388.84   409.06   434.14   37.8     62%   FAIL  IBKR          10.4% below MA200
+MSFT     1/4     █░░░       407.94   401.19   466.49   46.9     30%   PASS  IBKR          12.6% below MA200
+TSM      1/4     █░░░       342.15   364.64   316.73   43.0     82%   PASS  IBKR          6.2% below MA50
+AVGO     1/4     █░░░       342.23   330.06   347.61   57.7     74%   FAIL  IBKR          1.5% below MA200
+CSCO     1/4     █░░░        75.78    79.47    76.21   41.3     68%   PASS  IBKR          0.6% below MA200
+IBM      1/4     █░░░       253.77   254.50   289.96   44.9     39%   FAIL  IBKR          12.5% below MA200
+MA       1/4     █░░░       512.00   520.91   547.14   41.4     29%   FAIL  IBKR          6.4% below MA200
+ASML     1/4     █░░░      1322.94  1425.00  1195.35   42.0     78%   PASS  IBKR          7.2% below MA50
+ISRG     1/4     █░░░       487.52   495.91   533.59   39.4     35%   FAIL  IBKR          8.6% below MA200
+XOM      0/4     ░░░░       151.91   150.44   126.53   60.6     95%   PASS  IBKR          —
+PG       0/4     ░░░░       154.82   160.11   148.90   45.1     51%   PASS  IBKR          —
+RTX      0/4     ░░░░       208.42   202.43   185.07   58.2     96%   FAIL  IBKR          —
+MRK      0/4     ░░░░       116.03   120.24   103.57   45.7     85%   FAIL  IBKR          —
+JNJ      0/4     ░░░░       242.32   243.14   211.89   57.2     94%   FAIL  IBKR          —
+GE       0/4     ░░░░       313.34   329.72   309.37   41.6     82%   FAIL  IBKR          —
+PEP      0/4     ░░░░       160.75   164.32   149.54   50.0     82%   FAIL  IBKR          —
+HSBC     0/4     ░░░░        83.97    88.23    78.14   42.7     78%   PASS  IBKR          —
+TMUS     0/4     ░░░░       219.12   214.88   205.30   61.0     45%   FAIL  IBKR          —
+NVS      0/4     ░░░░       160.65   163.43   141.21   52.2     88%   PASS  IBKR          —
+COST     0/4     ░░░░      1001.49   996.09   932.32   55.7     75%   FAIL  IBKR          —
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+  TABLE 2 — FUNDAMENTAL SCREEN
+  Thresholds: PE<60.0 | margin>5% | D/E<3.0 | FCF>0 | FCFyield>1.5% | ROE>10% | capex/FCF<75%
+════════════════════════════════════════════════════════════════════════════════════════════════════
+SYMBOL   STATUS        FCF   YIELD   MARGIN     D/E     ROE      PE  REASON / NOTES
+────────────────────────────────────────────────────────────────────────────────────────────────────
+NVDA     FAIL       $28.0B   0.64%   272.6%    1.5x    135%   147.7  PE=147.7 > MAX_PE_RATIO=60.0; FCF yield=0.64% < MIN=1.50%
+TSLA     FAIL        $4.4B   0.35%    15.5%    0.7x     21%    83.4  PE=83.4 > MAX_PE_RATIO=60.0; FCF yield=0.35% < MIN=1.50%; Capex/FCF=204.25% > MAX=75.00%
+BAC      FAIL       $45.0B  12.51%    25.6%   10.9x     10%    13.7  ROE=9.6% < MIN=10.0%
+MSFT     PASS       $59.5B   1.95%    34.1%    1.2x     35%    42.1  All filters passed
+XOM      PASS       $33.5B   5.39%    14.1%    0.7x     14%    17.2  All filters passed
+TSM      PASS          N/A     N/A      N/A     N/A     N/A     N/A  All filters passed
+AVGO     FAIL       $17.6B   1.10%    32.1%    3.7x     43%   139.5  PE=139.5 > MAX_PE_RATIO=60.0; D/E=3.68 > MAX=3.0 (non-financial); FCF yield=1.10% < MIN=1.50%
+NOW      FAIL        $2.7B   2.12%    19.3%    2.1x     34%    73.6  PE=73.6 > MAX_PE_RATIO=60.0
+WFC      PASS       $40.4B  13.57%    21.7%    9.8x     11%    15.5  All filters passed
+CSCO     PASS       $19.0B   6.27%    22.1%    2.0x     32%    24.1  All filters passed
+SAP      PASS          N/A     N/A      N/A     N/A     N/A     N/A  All filters passed
+PG       PASS       $13.8B     N/A    17.9%    1.5x     31%     N/A  All filters passed
+HIMS     FAIL        $0.1B     N/A    -2.7%    0.7x     -8%     N/A  profitMargin=-2.7% < MIN=5.0%; ROE=-7.6% < MIN=10.0%
+RTX      FAIL        $5.5B 1914.92%     4.6%    1.7x      5%     0.1  profitMargin=4.6% < MIN=5.0%; ROE=5.3% < MIN=10.0%
+MRK      FAIL        $9.1B     N/A     0.6%     N/A      1%     N/A  profitMargin=0.6% < MIN=5.0%; FCF grew in fewer than 2 of last 3 year(s); ROE=0.8% < MIN=10.0%
+UNH      PASS       $25.7B   9.93%     6.0%    6.9x     79%    11.6  All filters passed
+IBM      FAIL       $12.7B   5.34%    12.1%    4.0x     27%    31.7  D/E=4.02 > MAX=3.0 (non-financial); FCF grew in fewer than 2 of last 3 year(s)
+AXP      PASS       $17.0B   8.11%    22.5%    9.8x     34%    25.0  All filters passed
+V        PASS       $20.7B     N/A    52.9%    2.2x     69%     N/A  All filters passed
+JNJ      FAIL       $18.2B     N/A    41.3%    1.4x     46%     N/A  FCF grew in fewer than 2 of last 3 year(s)
+GE       FAIL        $3.6B   1.07%   134.6%    5.4x     49%    35.5  D/E=5.35 > MAX=3.0 (non-financial); FCF yield=1.07% < MIN=1.50%; FCF grew in fewer than 2 of last 3 year(s)
+PEP      FAIL        $7.9B     N/A     9.9%    4.5x     50%     N/A  D/E=4.51 > MAX=3.0 (non-financial)
+HSBC     PASS          N/A     N/A      N/A     N/A     N/A     N/A  All filters passed
+TMUS     FAIL        $8.8B   3.49%    10.6%    0.1x     12%    30.2  Capex/FCF=111.91% > MAX=75.00%
+MA       FAIL       $11.6B     N/A     7.6%    6.4x     29%     N/A  D/E=6.41 > MAX=3.0 (non-financial)
+HD       FAIL       $11.5B   3.25%    10.9%   48.3x   1095%    20.6  D/E=48.33 > MAX=3.0 (non-financial); FCF grew in fewer than 2 of last 3 year(s)
+NVS      PASS          N/A     N/A      N/A     N/A     N/A     N/A  All filters passed
+ASML     PASS          N/A     N/A      N/A     N/A     N/A     N/A  All filters passed
+TMO      PASS        $6.9B     N/A    14.0%     N/A     12%     N/A  All filters passed
+COST     FAIL        $6.7B   1.52%     2.6%    2.0x     27%    70.5  PE=70.5 > MAX_PE_RATIO=60.0; profitMargin=2.6% < MIN=5.0%; FCF grew in fewer than 2 of last 3 year(s)
+ISRG     FAIL        $1.7B   0.95%    25.2%    0.1x     11%    96.7  PE=96.7 > MAX_PE_RATIO=60.0; FCF yield=0.95% < MIN=1.50%
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+  SUMMARY — 2026-03-09  12:27:52
+════════════════════════════════════════════════════════════════════════════════════════════════════
+  🟢 BUY SIGNAL  (dip ✅  +  fundamentals ✅) : WFC, AXP
+  🟡 DIP ONLY    (dip ✅  +  fundamentals ❌) : BAC, HD  ← manual call
+────────────────────────────────────────────────────────────────────────────────────────────────────
