@@ -362,10 +362,17 @@ def _make_table(df: pd.DataFrame, tid: str, hide_cols: list[str] | None = None,
             {"if": {"filter_query": "{pct_gain} > 0", "column_id": "pct_gain"}, "color": GREEN},
             {"if": {"filter_query": "{pct_gain} < 0", "column_id": "pct_gain"}, "color": RED},
         ]
-    if "realized_pnl" in display_df.columns:
+    if "realized_pnl" in display_df.columns or "Realized P&L $" in display_df.columns:
+        col = "realized_pnl" if "realized_pnl" in display_df.columns else "Realized P&L $"
         style_data_conditional += [
-            {"if": {"filter_query": "{realized_pnl} > 0", "column_id": "realized_pnl"}, "color": GREEN, "fontWeight": "bold"},
-            {"if": {"filter_query": "{realized_pnl} < 0", "column_id": "realized_pnl"}, "color": RED,   "fontWeight": "bold"},
+            {"if": {"filter_query": f"{{{col}}} > 0", "column_id": col}, "color": GREEN, "fontWeight": "bold"},
+            {"if": {"filter_query": f"{{{col}}} < 0", "column_id": col}, "color": RED,   "fontWeight": "bold"},
+        ]
+    if "Exposure %" in display_df.columns:
+        style_data_conditional += [
+            {"if": {"filter_query": "{Exposure %} <= 10",                     "column_id": "Exposure %"}, "color": GREEN},
+            {"if": {"filter_query": "{Exposure %} > 10 && {Exposure %} <= 20","column_id": "Exposure %"}, "color": YELLOW},
+            {"if": {"filter_query": "{Exposure %} > 20",                      "column_id": "Exposure %"}, "color": RED, "fontWeight": "bold"},
         ]
     if "Action" in display_df.columns:
         style_data_conditional += [
@@ -890,12 +897,44 @@ def _trades_layout():
             xaxis=dict(color=TEXT), yaxis=dict(color=TEXT, gridcolor=BORDER, title="P&L ($)"),
             margin=dict(t=40, b=20, l=20, r=20),
         )
+
+        # Per-symbol Exposure % bar (amount_invested / ACCOUNT_EQUITY * 100)
+        sym_exp = df.groupby("symbol")["amount_invested"].sum().reset_index()
+        sym_exp["exposure_pct"] = (sym_exp["amount_invested"] / ACCOUNT_EQUITY * 100).round(2)
+        sym_exp = sym_exp.sort_values("exposure_pct", ascending=False)
+        exp_colors = [
+            GREEN if v <= 10 else YELLOW if v <= 20 else RED
+            for v in sym_exp["exposure_pct"]
+        ]
+        exp_fig = go.Figure(go.Bar(
+            x=sym_exp["symbol"], y=sym_exp["exposure_pct"],
+            marker_color=exp_colors,
+            text=[f"{v:.1f}%" for v in sym_exp["exposure_pct"]],
+            textposition="outside",
+        ))
+        exp_fig.add_hline(y=10,  line_color=GREEN,  line_dash="dot",
+                          annotation_text="10%", annotation_font_color=GREEN)
+        exp_fig.add_hline(y=20,  line_color=YELLOW, line_dash="dot",
+                          annotation_text="20%", annotation_font_color=YELLOW)
+        exp_fig.update_layout(
+            title=f"% Budget Exposure by Symbol  (budget = ${ACCOUNT_EQUITY:,.0f})",
+            paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+            font=dict(color=TEXT),
+            xaxis=dict(color=TEXT),
+            yaxis=dict(color=TEXT, gridcolor=BORDER, title="% of Budget", ticksuffix="%"),
+            margin=dict(t=40, b=20, l=20, r=20),
+        )
+
         charts = dbc.Row([
             dbc.Col(_card(dcc.Graph(figure=pnl_fig, config={"displayModeBar": False})), width=8),
             dbc.Col(_card(dcc.Graph(figure=sym_fig, config={"displayModeBar": False})), width=4),
         ], className="mb-3")
+        exp_chart = dbc.Row([
+            dbc.Col(_card(dcc.Graph(figure=exp_fig, config={"displayModeBar": False})), width=12),
+        ], className="mb-3")
     else:
         charts = html.Div()
+        exp_chart = html.Div()
 
     # ── trade entry form ──────────────────────────────────────────────────────
     form_card = _card([
@@ -974,8 +1013,18 @@ def _trades_layout():
     # ── trade log table ───────────────────────────────────────────────────────
     if not df.empty:
         display_df = df.copy()
+        # Add % Exposure column = amount_invested / total budget × 100
+        display_df["exposure_pct"] = (
+            display_df["amount_invested"] / ACCOUNT_EQUITY * 100
+        ).round(2)
         display_df.columns = ["Date", "Symbol", "Action", "Qty", "Entry $",
-                               "Exit $", "Invested $", "Realized P&L $", "Notes"]
+                               "Exit $", "Invested $", "Realized P&L $", "Notes", "Exposure %"]
+
+        # Reorder so Exposure % sits right after Invested $
+        display_df = display_df[["Date", "Symbol", "Action", "Qty", "Entry $",
+                                  "Exit $", "Invested $", "Exposure %",
+                                  "Realized P&L $", "Notes"]]
+
         table_section = _card([
             html.H6(f"Trade Journal  ({n_trades} entries)",
                     style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "12px"}),
@@ -996,7 +1045,7 @@ def _trades_layout():
                      style={"color": MUTED, "fontFamily": "monospace"})
         )
 
-    return html.Div([stat_row, charts, form_card, table_section])
+    return html.Div([stat_row, charts, exp_chart, form_card, table_section])
 
 
 # ---------------------------------------------------------------------------
