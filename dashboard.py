@@ -126,19 +126,31 @@ def _delete_trade(idx: int):
 # ---------------------------------------------------------------------------
 
 def _check_ibkr_status() -> tuple[bool, str]:
-    """Return (connected: bool, message: str) for IBKR TWS/Gateway."""
+    """Return (connected: bool, message: str) for IBKR TWS/Gateway.
+
+    Uses a random clientId in the 200-299 range so it never conflicts with
+    the price-fetch connections (clientId 100) or the main trader (clientId 1).
+    """
+    import random
     try:
         from ib_insync import IB
         ib = IB()
+        # Random clientId avoids "already in use" clash with concurrent connections
+        cid = random.randint(200, 299)
         ib.connect(config.IBKR_HOST, config.IBKR_PORT,
-                   clientId=config.IBKR_CLIENT_ID + 98, readonly=True, timeout=3)
+                   clientId=cid, readonly=True, timeout=4)
         connected = ib.isConnected()
         ib.disconnect()
         if connected:
             return True, f"✅ IBKR Connected  ({config.IBKR_HOST}:{config.IBKR_PORT})"
         return False, f"❌ IBKR Not Connected  ({config.IBKR_HOST}:{config.IBKR_PORT})"
     except Exception as exc:
-        return False, f"❌ IBKR Unavailable — {exc}  →  Stooq fallback active"
+        # Only show "unavailable" if the port itself is unreachable
+        addr = f"{config.IBKR_HOST}:{config.IBKR_PORT}"
+        if "client id is already in use" in str(exc).lower() or "clientid" in str(exc).lower():
+            # clientId collision means TWS IS running — just return connected
+            return True, f"✅ IBKR Connected  ({addr})"
+        return False, f"❌ IBKR Unavailable ({addr}) — {type(exc).__name__}  →  yfinance fallback active"
 
 
 # ---------------------------------------------------------------------------

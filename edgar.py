@@ -132,14 +132,18 @@ def _safe(value) -> Optional[float]:
 def _fetch_price_from_ibkr(symbol: str, period_years: int = 2) -> Optional[pd.DataFrame]:
     """Try to fetch price history from a running IBKR TWS/Gateway instance.
 
-    Returns a DataFrame (oldest-first, columns matching Stooq output) or None
+    Returns a DataFrame (oldest-first, columns matching yfinance output) or None
     if TWS is not running or the request fails.
     """
+    import random
     try:
         from ib_insync import IB, Stock, util
         import config as _cfg
         ib = IB()
-        ib.connect(_cfg.IBKR_HOST, _cfg.IBKR_PORT, clientId=_cfg.IBKR_CLIENT_ID + 99, readonly=True, timeout=4)
+        # Random clientId in 100-199 range avoids clashes with dashboard status check
+        # (200-299) and the main trader clientId (1)
+        cid = random.randint(100, 199)
+        ib.connect(_cfg.IBKR_HOST, _cfg.IBKR_PORT, clientId=cid, readonly=True, timeout=4)
         contract = Stock(symbol.upper(), "SMART", "USD")
         duration = f"{period_years} Y"
         bars = ib.reqHistoricalData(
