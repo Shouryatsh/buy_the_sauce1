@@ -132,45 +132,64 @@ def _safe(value) -> Optional[float]:
 def _fetch_price_from_ibkr(symbol: str, period_years: int = 2) -> Optional[pd.DataFrame]:
     """Try to fetch price history from a running IBKR TWS/Gateway instance.
 
-    Returns a DataFrame (oldest-first, columns matching yfinance output) or None
-    if TWS is not running or the request fails.
+    ib_insync uses asyncio internally.  When called from a Dash callback
+    (which runs in a worker thread with no event loop), we must create one
+    explicitly, run the fetch inside it, then close it.
+
+    Returns a DataFrame (oldest-first, OHLCV columns) or None on any failure.
     """
-    import random, time as _time
-    try:
+    import asyncio, random, time as _time
+
+    async def _fetch_async():
         from ib_insync import IB, Stock, util
         import config as _cfg
         ib = IB()
-        # Random clientId in 100-199 to avoid clashes with status check (200-299) and trader (1)
-        # Retry once with a fresh id if there's a collision
         for attempt in range(3):
             cid = random.randint(100, 199)
             try:
-                ib.connect(_cfg.IBKR_HOST, _cfg.IBKR_PORT, clientId=cid, readonly=True, timeout=4)
-                break   # connected — exit retry loop
+                await ib.connectAsync(_cfg.IBKR_HOST, _cfg.IBKR_PORT,
+                                      clientId=cid, readonly=True, timeout=4)
+                break
             except Exception as conn_exc:
                 if "already in use" in str(conn_exc).lower() and attempt < 2:
-                    _time.sleep(0.3)   # wait briefly and try a new random id
+                    await asyncio.sleep(0.3)
                     continue
-                raise  # re-raise on last attempt or non-collision error
+                raise
+
         contract = Stock(symbol.upper(), "SMART", "USD")
         duration = f"{period_years} Y"
-        bars = ib.reqHistoricalData(
+        bars = await ib.reqHistoricalDataAsync(
             contract,
             endDateTime="",
             durationStr=duration,
             barSizeSetting="1 day",
-            whatToShow="ADJUSTED_LAST",
+            whatToShow="TRADES",
             useRTH=True,
         )
         ib.disconnect()
+        return bars
+
+    try:
+        # Create a fresh event loop for this thread (safe in Dash worker threads)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            bars = loop.run_until_complete(_fetch_async())
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
+
         if not bars:
             return None
+
+        from ib_insync import util
         df = util.df(bars)[["date", "open", "high", "low", "close", "volume"]].copy()
         df.columns = ["Date", "Open", "High", "Low", "Close", "Volume"]
         df = df.set_index("Date").sort_index()
         logger.info("%s: fetched %d price bars from IBKR", symbol, len(df))
         return df
     except Exception as exc:
+        print(f"[edgar] {symbol}: IBKR skipped — {type(exc).__name__}: {exc}")
         logger.debug("%s: IBKR price fetch skipped — %s", symbol, exc)
         return None
 
