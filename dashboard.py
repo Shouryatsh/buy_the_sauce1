@@ -7,6 +7,7 @@ Tabs
   2. 💰 Risk & Capital  Position sizing, capital allocation, risk heat-map ($80k budget)
   3. 📈 Back-test       Equity curve + trade log from results/backtest_trades.csv
   4. 🗂 Screen Log      Historical screener runs from results/screen_log.csv
+  5. 📒 My Trades       Manual transaction journal — amounts, quantities, P&L
 
 Usage
 -----
@@ -22,6 +23,7 @@ shows the time since the last refresh.
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime
 import os
 import sys
@@ -49,6 +51,7 @@ ACCOUNT_EQUITY  = 80_000.0   # user's stated budget
 RESULTS_DIR     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 SCREEN_CSV      = os.path.join(RESULTS_DIR, "screen_log.csv")
 BACKTEST_CSV    = os.path.join(RESULTS_DIR, "backtest_trades.csv")
+TRADES_CSV      = os.path.join(RESULTS_DIR, "my_trades.csv")   # manual journal
 
 BRAND_BG    = "#0d1117"
 CARD_BG     = "#161b22"
@@ -75,6 +78,68 @@ _HDR_STYLE = {
     "fontSize": "13px",
     "border": f"1px solid {BORDER}",
 }
+
+# ── My Trades CSV schema ────────────────────────────────────────────────────
+_TRADES_COLS = [
+    "date", "symbol", "action", "quantity", "entry_price",
+    "exit_price", "amount_invested", "realized_pnl", "notes",
+]
+
+def _ensure_trades_csv():
+    """Create the trades CSV with headers if it doesn't exist."""
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    if not os.path.exists(TRADES_CSV):
+        with open(TRADES_CSV, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=_TRADES_COLS)
+            writer.writeheader()
+
+def _load_trades() -> pd.DataFrame:
+    _ensure_trades_csv()
+    try:
+        df = pd.read_csv(TRADES_CSV)
+        for col in _TRADES_COLS:
+            if col not in df.columns:
+                df[col] = None
+        # coerce numeric cols
+        for col in ["quantity", "entry_price", "exit_price", "amount_invested", "realized_pnl"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df
+    except Exception:
+        return pd.DataFrame(columns=_TRADES_COLS)
+
+def _append_trade(row: dict):
+    """Append a single trade dict to the CSV."""
+    _ensure_trades_csv()
+    with open(TRADES_CSV, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=_TRADES_COLS)
+        writer.writerow({k: row.get(k, "") for k in _TRADES_COLS})
+
+def _delete_trade(idx: int):
+    """Delete trade at zero-based index from CSV."""
+    df = _load_trades()
+    df = df.drop(index=idx).reset_index(drop=True)
+    df.to_csv(TRADES_CSV, index=False)
+
+
+# ---------------------------------------------------------------------------
+# IBKR connectivity check
+# ---------------------------------------------------------------------------
+
+def _check_ibkr_status() -> tuple[bool, str]:
+    """Return (connected: bool, message: str) for IBKR TWS/Gateway."""
+    try:
+        from ib_insync import IB
+        ib = IB()
+        ib.connect(config.IBKR_HOST, config.IBKR_PORT,
+                   clientId=config.IBKR_CLIENT_ID + 98, readonly=True, timeout=3)
+        connected = ib.isConnected()
+        ib.disconnect()
+        if connected:
+            return True, f"✅ IBKR Connected  ({config.IBKR_HOST}:{config.IBKR_PORT})"
+        return False, f"❌ IBKR Not Connected  ({config.IBKR_HOST}:{config.IBKR_PORT})"
+    except Exception as exc:
+        return False, f"❌ IBKR Unavailable — {exc}  →  Stooq fallback active"
+
 
 # ---------------------------------------------------------------------------
 # Data fetching (runs in-process — same as run_screen.py)
@@ -262,6 +327,16 @@ def _make_table(df: pd.DataFrame, tid: str, hide_cols: list[str] | None = None,
             {"if": {"filter_query": "{pct_gain} > 0", "column_id": "pct_gain"}, "color": GREEN},
             {"if": {"filter_query": "{pct_gain} < 0", "column_id": "pct_gain"}, "color": RED},
         ]
+    if "realized_pnl" in display_df.columns:
+        style_data_conditional += [
+            {"if": {"filter_query": "{realized_pnl} > 0", "column_id": "realized_pnl"}, "color": GREEN, "fontWeight": "bold"},
+            {"if": {"filter_query": "{realized_pnl} < 0", "column_id": "realized_pnl"}, "color": RED,   "fontWeight": "bold"},
+        ]
+    if "Action" in display_df.columns:
+        style_data_conditional += [
+            {"if": {"filter_query": '{Action} = "BUY"',  "column_id": "Action"}, "color": GREEN},
+            {"if": {"filter_query": '{Action} = "SELL"', "column_id": "Action"}, "color": RED},
+        ]
 
     return dash_table.DataTable(
         id=tid,
@@ -296,6 +371,8 @@ app.layout = html.Div(
                     "color": ACCENT, "fontWeight": "bold", "fontSize": "20px", "fontFamily": "monospace",
                 }),
                 dbc.NavbarToggler(id="navbar-toggler"),
+                html.Span(id="ibkr-status-label",
+                          style={"color": MUTED, "fontSize": "12px", "fontFamily": "monospace", "marginLeft": "16px"}),
                 html.Span(id="last-refresh-label",
                           style={"color": MUTED, "fontSize": "12px", "fontFamily": "monospace", "marginLeft": "auto"}),
             ], fluid=True),
@@ -307,6 +384,7 @@ app.layout = html.Div(
 
             # ── store (holds fetched data as JSON) ────────────────────────────
             dcc.Store(id="screen-store"),
+            dcc.Store(id="trades-store"),           # triggers trades table refresh
             dcc.Interval(id="clock-tick", interval=60_000, n_intervals=0),  # 1-min clock
 
             # ── tabs ──────────────────────────────────────────────────────────
@@ -315,6 +393,7 @@ app.layout = html.Div(
                 dbc.Tab(label="💰  Risk & Capital", tab_id="tab-risk"),
                 dbc.Tab(label="📈  Back-test",      tab_id="tab-backtest"),
                 dbc.Tab(label="🗂  Screen Log",     tab_id="tab-log"),
+                dbc.Tab(label="📒  My Trades",      tab_id="tab-trades"),
             ], style={"marginBottom": "20px"}),
 
             html.Div(id="tab-content"),
@@ -696,6 +775,196 @@ def _log_layout():
 
 
 # ---------------------------------------------------------------------------
+# Tab 5 — My Trades (manual transaction journal)
+# ---------------------------------------------------------------------------
+
+_INPUT_STYLE = {
+    "backgroundColor": "#21262d",
+    "color": TEXT,
+    "border": f"1px solid {BORDER}",
+    "borderRadius": "4px",
+    "fontFamily": "monospace",
+    "fontSize": "13px",
+    "width": "100%",
+    "padding": "6px 10px",
+}
+
+def _trades_layout():
+    """Build the full My Trades tab layout (form + summary + chart + table)."""
+    df = _load_trades()
+
+    # ── summary stat cards ────────────────────────────────────────────────────
+    total_invested  = df["amount_invested"].sum() if not df.empty else 0
+    realized_pnl    = df["realized_pnl"].dropna().sum() if not df.empty else 0
+    n_trades        = len(df)
+    n_wins          = int((df["realized_pnl"] > 0).sum()) if not df.empty else 0
+    win_rate        = n_wins / n_trades if n_trades > 0 else 0
+    roi_pct         = realized_pnl / total_invested * 100 if total_invested else 0
+
+    stat_row = dbc.Row([
+        _stat_card("Total Trades",      str(n_trades),                    ACCENT),
+        _stat_card("Total Invested",    f"${total_invested:,.0f}",        TEXT),
+        _stat_card("Realized P&L",      f"${realized_pnl:+,.2f}",        GREEN if realized_pnl >= 0 else RED),
+        _stat_card("ROI %",             f"{roi_pct:+.2f}%",               GREEN if roi_pct >= 0 else RED),
+        _stat_card("Win Rate",          f"{win_rate:.0%}  ({n_wins}/{n_trades})", GREEN if win_rate >= 0.5 else (YELLOW if n_trades else MUTED)),
+    ], className="mb-3")
+
+    # ── cumulative P&L chart ──────────────────────────────────────────────────
+    if not df.empty and df["realized_pnl"].notna().any():
+        pnl_df = df[df["realized_pnl"].notna()].copy()
+        pnl_df = pnl_df.sort_values("date")
+        pnl_df["cum_pnl"] = pnl_df["realized_pnl"].cumsum()
+
+        pnl_fig = go.Figure()
+        pnl_fig.add_trace(go.Scatter(
+            x=pnl_df["date"], y=pnl_df["cum_pnl"],
+            mode="lines+markers",
+            line=dict(color=ACCENT, width=2),
+            marker=dict(
+                color=[GREEN if v >= 0 else RED for v in pnl_df["cum_pnl"]],
+                size=8,
+            ),
+            fill="tozeroy",
+            fillcolor="rgba(88,166,255,0.08)",
+            hovertemplate="%{x}<br>Cum P&L: $%{y:+,.2f}<extra></extra>",
+        ))
+        pnl_fig.add_hline(y=0, line_color=BORDER, line_dash="dash")
+        pnl_fig.update_layout(
+            title="Cumulative Realized P&L",
+            paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+            font=dict(color=TEXT),
+            xaxis=dict(gridcolor=BORDER, color=TEXT, title="Date"),
+            yaxis=dict(gridcolor=BORDER, color=TEXT, title="Cumulative P&L ($)"),
+            margin=dict(t=40, b=20, l=20, r=20),
+        )
+
+        # Per-symbol P&L bar
+        sym_pnl = pnl_df.groupby("symbol")["realized_pnl"].sum().reset_index()
+        sym_pnl.columns = ["Symbol", "P&L"]
+        sym_fig = go.Figure(go.Bar(
+            x=sym_pnl["Symbol"], y=sym_pnl["P&L"],
+            marker_color=[GREEN if v >= 0 else RED for v in sym_pnl["P&L"]],
+            text=[f"${v:+,.2f}" for v in sym_pnl["P&L"]],
+            textposition="outside",
+        ))
+        sym_fig.add_hline(y=0, line_color=BORDER, line_dash="dash")
+        sym_fig.update_layout(
+            title="Realized P&L by Symbol",
+            paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+            font=dict(color=TEXT),
+            xaxis=dict(color=TEXT), yaxis=dict(color=TEXT, gridcolor=BORDER, title="P&L ($)"),
+            margin=dict(t=40, b=20, l=20, r=20),
+        )
+        charts = dbc.Row([
+            dbc.Col(_card(dcc.Graph(figure=pnl_fig, config={"displayModeBar": False})), width=8),
+            dbc.Col(_card(dcc.Graph(figure=sym_fig, config={"displayModeBar": False})), width=4),
+        ], className="mb-3")
+    else:
+        charts = html.Div()
+
+    # ── trade entry form ──────────────────────────────────────────────────────
+    form_card = _card([
+        html.H6("➕ Log a New Trade", style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "12px"}),
+        dbc.Row([
+            dbc.Col([
+                html.Label("Date", style={"color": MUTED, "fontSize": "12px"}),
+                dcc.Input(
+                    id="trade-date", type="text",
+                    placeholder=datetime.date.today().isoformat(),
+                    value=datetime.date.today().isoformat(),
+                    debounce=True, style=_INPUT_STYLE,
+                ),
+            ], width=2),
+            dbc.Col([
+                html.Label("Symbol", style={"color": MUTED, "fontSize": "12px"}),
+                dcc.Input(id="trade-symbol", type="text", placeholder="AAPL",
+                          debounce=True, style=_INPUT_STYLE),
+            ], width=2),
+            dbc.Col([
+                html.Label("Action", style={"color": MUTED, "fontSize": "12px"}),
+                dcc.Dropdown(
+                    id="trade-action",
+                    options=[{"label": "BUY", "value": "BUY"}, {"label": "SELL", "value": "SELL"}],
+                    value="BUY",
+                    style={"backgroundColor": "#21262d", "color": BRAND_BG, "fontFamily": "monospace"},
+                    clearable=False,
+                ),
+            ], width=1),
+            dbc.Col([
+                html.Label("Quantity", style={"color": MUTED, "fontSize": "12px"}),
+                dcc.Input(id="trade-qty", type="number", placeholder="10",
+                          debounce=True, style=_INPUT_STYLE),
+            ], width=1),
+            dbc.Col([
+                html.Label("Entry Price $", style={"color": MUTED, "fontSize": "12px"}),
+                dcc.Input(id="trade-entry", type="number", placeholder="150.00",
+                          debounce=True, style=_INPUT_STYLE),
+            ], width=2),
+            dbc.Col([
+                html.Label("Exit Price $ (opt)", style={"color": MUTED, "fontSize": "12px"}),
+                dcc.Input(id="trade-exit", type="number", placeholder="165.00",
+                          debounce=True, style=_INPUT_STYLE),
+            ], width=2),
+            dbc.Col([
+                html.Label("Notes (opt)", style={"color": MUTED, "fontSize": "12px"}),
+                dcc.Input(id="trade-notes", type="text", placeholder="Screener signal",
+                          debounce=True, style=_INPUT_STYLE),
+            ], width=2),
+        ], className="mb-3"),
+        dbc.Row([
+            dbc.Col(
+                dbc.Button("💾 Save Trade", id="save-trade-btn", color="success", size="sm",
+                           style={"fontFamily": "monospace"}),
+                width="auto",
+            ),
+            dbc.Col(
+                html.Div(id="trade-save-status",
+                         style={"color": MUTED, "fontFamily": "monospace", "fontSize": "13px",
+                                "paddingTop": "6px"}),
+                width=True,
+            ),
+        ]),
+        html.Div([
+            html.Hr(style={"borderColor": BORDER, "marginTop": "16px"}),
+            html.Div([
+                html.Span("💡 Realized P&L is auto-calculated from Entry/Exit when you save a SELL trade. "
+                          "You can also enter it manually via CSV at ",
+                          style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace"}),
+                html.Code("results/my_trades.csv",
+                          style={"color": ACCENT, "fontSize": "11px"}),
+            ]),
+        ]),
+    ])
+
+    # ── trade log table ───────────────────────────────────────────────────────
+    if not df.empty:
+        display_df = df.copy()
+        display_df.columns = ["Date", "Symbol", "Action", "Qty", "Entry $",
+                               "Exit $", "Invested $", "Realized P&L $", "Notes"]
+        table_section = _card([
+            html.H6(f"Trade Journal  ({n_trades} entries)",
+                    style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "12px"}),
+            _make_table(display_df, "trades-table"),
+            html.Div([
+                html.Hr(style={"borderColor": BORDER}),
+                html.Span("✏️  Edit directly in ",
+                          style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace"}),
+                html.Code("results/my_trades.csv",
+                          style={"color": ACCENT, "fontSize": "11px"}),
+                html.Span(" and refresh the page to reload.",
+                          style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace"}),
+            ]),
+        ])
+    else:
+        table_section = _card(
+            html.Div("No trades logged yet. Use the form above to add your first trade.",
+                     style={"color": MUTED, "fontFamily": "monospace"})
+        )
+
+    return html.Div([stat_row, charts, form_card, table_section])
+
+
+# ---------------------------------------------------------------------------
 # Callbacks
 # ---------------------------------------------------------------------------
 
@@ -703,8 +972,9 @@ def _log_layout():
     Output("tab-content", "children"),
     Input("tabs", "active_tab"),
     State("screen-store", "data"),
+    State("trades-store", "data"),
 )
-def render_tab(active_tab, store_data):
+def render_tab(active_tab, store_data, trades_store):
     if active_tab == "tab-screener":
         return _screener_layout()
     if active_tab == "tab-risk":
@@ -717,6 +987,8 @@ def render_tab(active_tab, store_data):
         return _backtest_layout()
     if active_tab == "tab-log":
         return _log_layout()
+    if active_tab == "tab-trades":
+        return _trades_layout()
     return html.Div("Unknown tab")
 
 
@@ -726,6 +998,7 @@ def render_tab(active_tab, store_data):
     Output("stat-cards",             "children"),
     Output("refresh-status",         "children"),
     Output("last-refresh-label",     "children"),
+    Output("ibkr-status-label",      "children"),
     Input("refresh-btn",             "n_clicks"),
     prevent_initial_call=True,
 )
@@ -734,6 +1007,10 @@ def refresh_screener(n_clicks):
     global _last_fetch
 
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Check IBKR status first (non-blocking)
+    ibkr_ok, ibkr_msg = _check_ibkr_status()
+
     try:
         records  = fetch_screen_data()
         df       = _records_to_df(records)
@@ -743,7 +1020,12 @@ def refresh_screener(n_clicks):
             dash.no_update, dash.no_update, dash.no_update,
             html.Span(f"❌ Error: {exc}", style={"color": RED}),
             f"Last refresh: {ts}",
+            html.Span(ibkr_msg, style={"color": GREEN if ibkr_ok else YELLOW}),
         )
+
+    # Count price sources to display in status
+    src_counts = df["Src"].value_counts().to_dict() if "Src" in df.columns else {}
+    src_summary = "  ".join(f"{src}:{cnt}" for src, cnt in src_counts.items())
 
     # stat cards
     n_buy   = df["Signal"].str.contains("BUY").sum()
@@ -755,6 +1037,7 @@ def refresh_screener(n_clicks):
         _stat_card("🟡 Dip Alerts",   str(n_dip),               YELLOW),
         _stat_card("⚪ Watch",         str(n_watch),             MUTED),
         _stat_card("Tickers Scanned", str(len(df)),              ACCENT),
+        _stat_card("Price Sources",   src_summary or "—",        MUTED),
         _stat_card("Last Refresh",    ts,                        MUTED),
     ])
 
@@ -767,6 +1050,81 @@ def refresh_screener(n_clicks):
         stat_cards,
         html.Span(f"✅ Updated {ts}", style={"color": GREEN}),
         f"Last refresh: {ts}",
+        html.Span(ibkr_msg, style={"color": GREEN if ibkr_ok else YELLOW}),
+    )
+
+
+@app.callback(
+    Output("trades-store",      "data"),
+    Output("trade-save-status", "children"),
+    Output("trade-symbol",      "value"),
+    Output("trade-qty",         "value"),
+    Output("trade-entry",       "value"),
+    Output("trade-exit",        "value"),
+    Output("trade-notes",       "value"),
+    Input("save-trade-btn",     "n_clicks"),
+    State("trade-date",         "value"),
+    State("trade-symbol",       "value"),
+    State("trade-action",       "value"),
+    State("trade-qty",          "value"),
+    State("trade-entry",        "value"),
+    State("trade-exit",         "value"),
+    State("trade-notes",        "value"),
+    prevent_initial_call=True,
+)
+def save_trade(n_clicks, date, symbol, action, qty, entry, exit_p, notes):
+    """Validate inputs, auto-calculate P&L, append to CSV, refresh display."""
+    errors = []
+    if not symbol or not str(symbol).strip():
+        errors.append("Symbol is required.")
+    if not qty or float(qty) <= 0:
+        errors.append("Quantity must be > 0.")
+    if not entry or float(entry) <= 0:
+        errors.append("Entry Price must be > 0.")
+    if errors:
+        return (
+            dash.no_update,
+            html.Span("⚠️ " + "  ".join(errors), style={"color": YELLOW}),
+            dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update,
+        )
+
+    qty_f    = float(qty)
+    entry_f  = float(entry)
+    exit_f   = float(exit_p) if exit_p else None
+
+    # Auto-compute realized P&L for SELL trades if exit is provided
+    realized = None
+    if action == "SELL" and exit_f is not None:
+        realized = (exit_f - entry_f) * qty_f
+    amount_invested = round(qty_f * entry_f, 2)
+
+    row = {
+        "date":            date or datetime.date.today().isoformat(),
+        "symbol":          str(symbol).strip().upper(),
+        "action":          action or "BUY",
+        "quantity":        qty_f,
+        "entry_price":     entry_f,
+        "exit_price":      exit_f if exit_f is not None else "",
+        "amount_invested": amount_invested,
+        "realized_pnl":    round(realized, 2) if realized is not None else "",
+        "notes":           (notes or "").strip(),
+    }
+    _append_trade(row)
+
+    pnl_msg = f"  →  P&L: ${realized:+,.2f}" if realized is not None else ""
+    status_msg = html.Span(
+        f"✅ Saved {row['action']} {qty_f:.0f}x {row['symbol']} @ ${entry_f:.2f}{pnl_msg}",
+        style={"color": GREEN},
+    )
+    # Return a timestamp as store data to trigger re-render of trades tab
+    return (
+        {"saved_at": datetime.datetime.now().isoformat()},
+        status_msg,
+        "",    # clear symbol
+        None,  # clear qty
+        None,  # clear entry
+        None,  # clear exit
+        "",    # clear notes
     )
 
 
@@ -793,9 +1151,14 @@ def _parse_args():
 
 
 if __name__ == "__main__":
+    _ensure_trades_csv()   # make sure journal exists on startup
     args = _parse_args()
     print(f"\n  🍅 Buy The Sauce Dashboard")
     print(f"  Open → http://127.0.0.1:{args.port}\n")
+    print(f"  IBKR config: {config.IBKR_HOST}:{config.IBKR_PORT}  (clientId {config.IBKR_CLIENT_ID})")
+    print(f"  Trade journal: {TRADES_CSV}\n")
+    ibkr_ok, ibkr_msg = _check_ibkr_status()
+    print(f"  {ibkr_msg}\n")
     app.run(
         debug=False,
         port=args.port,
