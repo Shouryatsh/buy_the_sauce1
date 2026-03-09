@@ -219,6 +219,17 @@ def _signal_notes(s: DipSignal) -> str:
         parts.append(f"52wk bottom {pct:.0f}%")
     return " | ".join(parts) if parts else "—"
 
+
+def _ml_tag(s: DipSignal) -> str:
+    """Short ML prediction string for the table, e.g. '↑78% HIGH'."""
+    if s.ml_direction is None:
+        return "—"
+    arrow = "↑" if s.ml_direction == "UP" else "↓"
+    prob  = f"{s.ml_probability:.0%}" if s.ml_probability is not None else "?"
+    conf  = s.ml_confidence or ""
+    return f"{arrow}{prob} {conf}"
+
+
 # ── score bar e.g. "████░░" ──────────────────────────────────────────────────
 def _bar(score, max_score=4):
     filled = "█" * score
@@ -266,7 +277,7 @@ def run_screen() -> None:
     dip_hdr = (
         f"{'SYMBOL':<8} {'SCORE':<8} {'BAR':<8} {'PRICE':>8} "
         f"{'MA50':>8} {'MA200':>8} {'RSI':>6} {'52WK%':>7}  "
-        f"{'FUND':>5}  {'SRC':<12}  SIGNALS"
+        f"{'FUND':>5}  {'ML 5D':>10}  {'SRC':<8}  SIGNALS"
     )
 
     dip_rows = []
@@ -281,29 +292,41 @@ def run_screen() -> None:
             dip_rows.append(
                 f"{symbol:<8} {'N/A':<8} {'░░░░':<8} {'N/A':>8} "
                 f"{'—':>8} {'—':>8} {'—':>6} {'—':>7}  "
-                f"{fund_ok:>5}  {'no price data':<12}  —"
+                f"{fund_ok:>5}  {'—':>10}  {'no price data':<8}  —"
             )
             continue
 
         rng_pct = (s.price - s.week52_low) / max(s.week52_high - s.week52_low, 1e-6) * 100
-        tag = ""
-        if s.is_dip and not profile.passes:
+        ml_str  = _ml_tag(s)
+
+        # Buy signal requires: dip ✅ + fundamentals ✅ + ML UP (if gating enabled)
+        ml_blocks  = config.ML_GATE_BUY_SIGNAL and s.ml_direction is not None and not s.ml_buy_confirmed
+        full_buy   = s.is_dip and profile.passes and (not config.ML_GATE_BUY_SIGNAL or s.ml_buy_confirmed)
+        dip_no_ml  = s.is_dip and profile.passes and config.ML_GATE_BUY_SIGNAL and ml_blocks
+
+        if full_buy:
+            tag = " ◄◄ BUY SIGNAL (dip ✅ fund ✅ ML ✅)"
+        elif dip_no_ml:
+            tag = " ◄ DIP+FUND (ML predicts DOWN — caution)"
+        elif s.is_dip and not profile.passes:
             tag = " ◄ DIP (fund FAIL — manual call)"
-        elif s.is_dip and profile.passes:
-            tag = " ◄◄ BUY SIGNAL (fund PASS)"
+        else:
+            tag = ""
 
         dip_rows.append(
             f"{symbol:<8} {s.score}/4{'':<4} {_bar(s.score):<8} "
             f"{s.price:>8.2f} {s.ma50:>8.2f} {s.ma200:>8.2f} "
-            f"{s.rsi:>6.1f} {rng_pct:>6.0f}%  {fund_ok:>5}  {src:<12}  "
+            f"{s.rsi:>6.1f} {rng_pct:>6.0f}%  {fund_ok:>5}  {ml_str:>10}  {src:<8}  "
             f"{_signal_notes(s)}{tag}"
         )
 
     sources_str = " + ".join(set(r.get("price_source", "unknown") for r in records))
+    ml_status   = f"ON (horizon={config.ML_PREDICT_HORIZON}d, gating={'ON' if config.ML_GATE_BUY_SIGNAL else 'OFF'})" if config.ML_ENABLED else "OFF"
     table1 = "\n".join([
         SEP2,
         f"  TABLE 1 — DIP DETECTOR  (sorted by dip score, best first)",
         f"  Price source : {sources_str}",
+        f"  ML predictor : {ml_status}",
         f"  Thresholds   : RSI < {config.RSI_OVERSOLD} | price > {config.DIP_FROM_MA50_PCT:.0%} below MA50 | below MA200 | 52wk bottom {config.WEEK52_LOWER_BAND:.0%}",
         SEP2,
         dip_hdr,
@@ -349,15 +372,29 @@ def run_screen() -> None:
     ] + fund_rows + [SEP])
 
     # ── summary ───────────────────────────────────────────────────────────────
-    buy_both    = [r["symbol"] for r in records if r["signal"] and r["signal"].is_dip and r["profile"].passes]
-    buy_diponly = [r["symbol"] for r in records if r["signal"] and r["signal"].is_dip and not r["profile"].passes]
+    buy_both    = [
+        r["symbol"] for r in records
+        if r["signal"] and r["signal"].is_dip and r["profile"].passes
+        and (not config.ML_GATE_BUY_SIGNAL or not config.ML_ENABLED or r["signal"].ml_buy_confirmed)
+    ]
+    buy_ml_warn = [
+        r["symbol"] for r in records
+        if r["signal"] and r["signal"].is_dip and r["profile"].passes
+        and config.ML_GATE_BUY_SIGNAL and config.ML_ENABLED
+        and r["signal"].ml_direction is not None and not r["signal"].ml_buy_confirmed
+    ]
+    buy_diponly = [
+        r["symbol"] for r in records
+        if r["signal"] and r["signal"].is_dip and not r["profile"].passes
+    ]
 
     summary = "\n".join([
         SEP2,
         f"  SUMMARY — {date_str}  {time_str}",
         SEP2,
-        f"  🟢 BUY SIGNAL  (dip ✅  +  fundamentals ✅) : {', '.join(buy_both)    if buy_both    else 'None today'}",
-        f"  🟡 DIP ONLY    (dip ✅  +  fundamentals ❌) : {', '.join(buy_diponly)  if buy_diponly else 'None'}  ← manual call",
+        f"  🟢 BUY SIGNAL  (dip ✅ + fund ✅ + ML ✅) : {', '.join(buy_both)    if buy_both    else 'None today'}",
+        f"  🟡 DIP+FUND, ML caution (predicts DOWN)  : {', '.join(buy_ml_warn)  if buy_ml_warn else 'None'}  ← review ML signal",
+        f"  🟠 DIP ONLY    (dip ✅ + fund ❌)         : {', '.join(buy_diponly)  if buy_diponly else 'None'}  ← manual call",
         SEP,
     ])
 
@@ -380,6 +417,7 @@ def run_screen() -> None:
         "date","time","symbol","dip_score","is_dip","fund_pass",
         "price","ma50","ma200","rsi","week52_pct",
         "fcf_usd","fcf_yield_pct","profit_margin_pct","debt_to_equity","roe_pct","pe",
+        "ml_direction","ml_probability","ml_confidence","ml_buy_confirmed",
         "price_source","fail_reasons",
     ]
     csv_exists = os.path.exists(csv_path)
@@ -413,6 +451,10 @@ def run_screen() -> None:
                 "debt_to_equity":     f"{profile.debt_to_equity:.2f}"       if profile.debt_to_equity      is not None else "",
                 "roe_pct":            f"{profile.return_on_equity*100:.1f}" if profile.return_on_equity    is not None else "",
                 "pe":                 f"{pe_val:.1f}"                       if pe_val                      is not None else "",
+                "ml_direction":       s.ml_direction    if s else "",
+                "ml_probability":     f"{s.ml_probability:.3f}" if s and s.ml_probability is not None else "",
+                "ml_confidence":      s.ml_confidence   if s else "",
+                "ml_buy_confirmed":   s.ml_buy_confirmed if s else "",
                 "price_source":       r.get("price_source", ""),
                 "fail_reasons":       "; ".join(profile.fail_reasons),
             })

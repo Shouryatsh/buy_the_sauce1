@@ -66,6 +66,25 @@ MAX_CAPEX_TO_FCF: float = 0.75      # Capex ≤ 75% of FCF
 #   (BRK-B railroads, META AI infra).  75% still screens out cash-incinerators.
 
 # ---------------------------------------------------------------------------
+# ML predictor  (ml_predictor.py)
+# ---------------------------------------------------------------------------
+ML_ENABLED: bool = True              # Set False to skip ML entirely (faster)
+ML_PREDICT_HORIZON: int = 5          # Predict price direction N days ahead
+ML_TRAIN_SPLIT: float = 0.80         # 80% of history used for training
+ML_MIN_TRAIN_SAMPLES: int = 150      # Skip ML if fewer clean samples available
+ML_N_ESTIMATORS: int = 200           # Random Forest trees
+ML_MAX_DEPTH: int = 6                # Max tree depth (controls overfitting)
+ML_MIN_SAMPLES_LEAF: int = 10        # Minimum samples per leaf (controls overfitting)
+
+# Confidence thresholds (probability of predicted class)
+ML_HIGH_CONFIDENCE_THRESHOLD: float   = 0.65   # ≥ 65% → HIGH
+ML_MEDIUM_CONFIDENCE_THRESHOLD: float = 0.55   # 55–65% → MEDIUM  (<55% → LOW)
+
+# Signal gating: ML must agree with dip direction (predict UP) before a
+# dip is promoted to a full BUY SIGNAL.  Set False to show ML as info-only.
+ML_GATE_BUY_SIGNAL: bool = True
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 LOG_FILE: str = "trading.log"

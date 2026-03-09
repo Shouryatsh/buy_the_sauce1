@@ -12,8 +12,13 @@ Signals
 3. Below MA-200   : price is below the 200-day MA (longer-term weakness)
 4. 52-week range  : price is in the bottom WEEK52_LOWER_BAND of its
                     52-week high-low range
+5. ML prediction  : Random Forest predicts UP in the next ML_PREDICT_HORIZON
+                    days with at least MEDIUM confidence (optional, controlled
+                    by config.ML_ENABLED and config.ML_GATE_BUY_SIGNAL)
 
-A stock that triggers all four signals has a perfect score of 4.
+A stock that triggers all four technical signals has a perfect score of 4.
+The ML signal does NOT add to the numeric score — instead it gates whether
+a dip is promoted to a full BUY SIGNAL (when config.ML_GATE_BUY_SIGNAL=True).
 """
 
 from __future__ import annotations
@@ -49,6 +54,11 @@ class DipSignal:
     week52_low: float
     week52_signal: bool
     is_dip: bool          # score >= MIN_DIP_SCORE
+    # ML prediction fields (None when ML is disabled or has insufficient data)
+    ml_direction: str | None = None     # "UP" | "DOWN" | None
+    ml_probability: float | None = None # probability of predicted direction
+    ml_confidence: str | None = None    # "HIGH" | "MEDIUM" | "LOW" | None
+    ml_buy_confirmed: bool = False      # True when ML predicts UP with >= MEDIUM confidence
 
     def __str__(self) -> str:
         signals = []
@@ -166,6 +176,28 @@ def score_dip(symbol: str, history: pd.DataFrame) -> DipSignal | None:
     score = sum([rsi_signal, ma50_signal, ma200_signal, week52_signal])
     is_dip = score >= config.MIN_DIP_SCORE
 
+    # --- ML prediction (optional) ---
+    ml_direction    = None
+    ml_probability  = None
+    ml_confidence   = None
+    ml_buy_confirmed = False
+
+    if config.ML_ENABLED:
+        try:
+            from ml_predictor import predict as ml_predict
+            ml_pred = ml_predict(symbol, history)
+            if ml_pred is not None:
+                ml_direction   = ml_pred.direction
+                ml_probability = ml_pred.probability
+                ml_confidence  = ml_pred.confidence
+                # Confirmed = ML predicts UP with at least MEDIUM confidence
+                ml_buy_confirmed = (
+                    ml_pred.direction == "UP"
+                    and ml_pred.confidence in ("MEDIUM", "HIGH")
+                )
+        except Exception as exc:
+            logger.debug("%s: ML prediction failed — %s", symbol, exc)
+
     result = DipSignal(
         symbol=symbol,
         score=score,
@@ -180,6 +212,10 @@ def score_dip(symbol: str, history: pd.DataFrame) -> DipSignal | None:
         week52_low=week52_low,
         week52_signal=week52_signal,
         is_dip=is_dip,
+        ml_direction=ml_direction,
+        ml_probability=ml_probability,
+        ml_confidence=ml_confidence,
+        ml_buy_confirmed=ml_buy_confirmed,
     )
     logger.info(str(result))
     return result
