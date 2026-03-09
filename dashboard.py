@@ -162,25 +162,39 @@ _last_fetch: dict = {}   # cached results to avoid re-fetching on every callback
 
 def fetch_screen_data() -> list[dict]:
     """Run the full screener pipeline and return a list of record dicts."""
+    import traceback
     import edgar
     from screener import screen_fundamental
     from dip_detector import score_dip
 
+    _FallbackProfile = lambda reasons: type("P", (), {
+        "passes": False, "fail_reasons": reasons,
+        "free_cash_flow": None, "fcf_yield": None,
+        "profit_margin": None, "debt_to_equity": None,
+        "return_on_equity": None,
+    })()
+
     records = []
     for symbol in WATCHLIST:
+        price_source = "error"
+        info = {}
+        profile = _FallbackProfile(["not fetched"])
+        signal = None
         try:
-            info    = edgar.get_fundamentals(symbol)
-            profile = screen_fundamental(symbol, info=info)
+            # --- price history first (IBKR → yfinance fallback) ---
             hist, price_source = edgar.get_price_history(symbol, period_years=2)
+            # --- fundamentals from EDGAR ---
+            try:
+                info    = edgar.get_fundamentals(symbol)
+                profile = screen_fundamental(symbol, info=info)
+            except Exception as fund_exc:
+                print(f"[dashboard] {symbol} fundamentals error: {fund_exc}")
+                profile = _FallbackProfile([f"fund error: {fund_exc}"])
+            # --- dip signal ---
             signal = score_dip(symbol, hist) if hist is not None and not hist.empty else None
-        except Exception:
-            profile = type("P", (), {"passes": False, "fail_reasons": ["fetch error"],
-                                      "free_cash_flow": None, "fcf_yield": None,
-                                      "profit_margin": None, "debt_to_equity": None,
-                                      "return_on_equity": None})()
-            signal = None
-            price_source = "error"
-            info = {}
+        except Exception as exc:
+            print(f"[dashboard] {symbol} fetch error: {exc}")
+            traceback.print_exc()
 
         records.append({
             "symbol":       symbol,
