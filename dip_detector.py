@@ -24,12 +24,16 @@ a dip is promoted to a full BUY SIGNAL (when config.ML_GATE_BUY_SIGNAL=True).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 
 import config
+
+if TYPE_CHECKING:
+    from ml_predictor import MultiHorizonOutlook, SwingMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +64,12 @@ class DipSignal:
     ml_confidence: str | None = None    # "HIGH" | "MEDIUM" | "LOW" | None
     ml_buy_confirmed: bool = False      # True when ML predicts UP with >= MEDIUM confidence
     ml_auroc_cv: float | None = None    # walk-forward CV AUROC (if computed)
+    ml_ks_cv: float | None = None       # walk-forward CV KS statistic (if computed)
+    ml_elapsed_s: float | None = None   # seconds taken by ML predict()
+    # Multi-horizon outlook (None when ML disabled or data insufficient)
+    multi_horizon: Optional["MultiHorizonOutlook"] = None
+    # Swing-trading sell metrics (None when data insufficient)
+    swing_metrics: Optional["SwingMetrics"] = None
 
     def __str__(self) -> str:
         signals = []
@@ -72,10 +82,37 @@ class DipSignal:
         if self.week52_signal:
             pct = (self.price - self.week52_low) / max(self.week52_high - self.week52_low, 1e-6)
             signals.append(f"52wk-range {pct*100:.0f}%")
+        ml_str = ""
+        if self.ml_direction is not None:
+            ml_str = (
+                f" | ML={self.ml_direction} p={self.ml_probability:.0%}"
+                f" [{self.ml_confidence}]"
+            )
+            if self.ml_auroc_cv is not None:
+                ml_str += f" AUROC={self.ml_auroc_cv:.3f}"
+        swing_str = ""
+        if self.swing_metrics is not None:
+            sm = self.swing_metrics
+            swing_str = (
+                f" | Swing:{sm.sell_recommendation}"
+                f"(score={sm.composite_sell_score:.0f},"
+                f"stop=${sm.atr_stop_price:.2f},"
+                f"target=${sm.atr_target_price:.2f})"
+            )
+        horizon_str = ""
+        if self.multi_horizon is not None:
+            mh = self.multi_horizon
+            parts = []
+            for label, pred in [("1W", mh.week1), ("1M", mh.month1), ("1Y", mh.year1)]:
+                if pred is not None:
+                    parts.append(f"{label}:{pred.direction}({pred.probability:.0%})")
+            if parts:
+                horizon_str = " | " + " ".join(parts)
         return (
             f"{self.symbol}: score={self.score} "
             f"[{', '.join(signals) if signals else 'no signals'}] "
             f"is_dip={self.is_dip}"
+            f"{ml_str}{horizon_str}{swing_str}"
         )
 
 
@@ -183,27 +220,60 @@ def score_dip(symbol: str, history: pd.DataFrame) -> DipSignal | None:
     ml_confidence   = None
     ml_buy_confirmed = False
     ml_auroc_cv     = None
+    ml_ks_cv        = None
+    ml_elapsed_s    = None
+    multi_horizon   = None
+    swing_metrics   = None
 
     if config.ML_ENABLED:
         try:
-            from ml_predictor import predict as ml_predict
+            from ml_predictor import predict as ml_predict, predict_multi_horizon, compute_swing_metrics
+
+            # ── 5-day (default-horizon) prediction for buy gate ──────────────
             ml_pred = ml_predict(
                 symbol,
                 history,
-                compute_cv_auroc=getattr(config, "ML_COMPUTE_CV_AUROC", False),
+                compute_cv_auroc=getattr(config, "ML_COMPUTE_CV_AUROC", True),
             )
             if ml_pred is not None:
-                ml_direction   = ml_pred.direction
-                ml_probability = ml_pred.probability
-                ml_confidence  = ml_pred.confidence
-                ml_auroc_cv    = getattr(ml_pred, "auroc_cv", None)
-                # Confirmed = ML predicts UP with at least MEDIUM confidence
+                ml_direction     = ml_pred.direction
+                ml_probability   = ml_pred.probability
+                ml_confidence    = ml_pred.confidence
+                ml_auroc_cv      = getattr(ml_pred, "auroc_cv",       None)
+                ml_ks_cv         = getattr(ml_pred, "ks_cv",          None)
+                ml_elapsed_s     = getattr(ml_pred, "elapsed_seconds", None)
                 ml_buy_confirmed = (
                     ml_pred.direction == "UP"
                     and ml_pred.confidence in ("MEDIUM", "HIGH")
                 )
+            else:
+                logger.debug(
+                    "%s: ML prediction suppressed (insufficient data or AUROC < threshold)",
+                    symbol,
+                )
+
+            # ── Multi-horizon outlook (1W / 1M / 1Y) + swing metrics ─────────
+            multi_horizon = predict_multi_horizon(
+                symbol,
+                history,
+                compute_cv_auroc=getattr(config, "ML_COMPUTE_CV_AUROC", True),
+            )
+            # Swing metrics are embedded inside multi_horizon but also exposed
+            # directly on DipSignal for easy access by trader.py
+            if multi_horizon is not None:
+                swing_metrics = multi_horizon.swing_metrics
+
         except Exception as exc:
-            logger.debug("%s: ML prediction failed — %s", symbol, exc)
+            logger.debug("%s: ML/multi-horizon prediction failed — %s", symbol, exc)
+
+    # Always compute swing metrics even when ML is disabled (they are pure
+    # technical indicators and require no ML libraries).
+    if swing_metrics is None:
+        try:
+            from ml_predictor import compute_swing_metrics
+            swing_metrics = compute_swing_metrics(symbol, history)
+        except Exception as exc:
+            logger.debug("%s: swing metrics computation failed — %s", symbol, exc)
 
     result = DipSignal(
         symbol=symbol,
@@ -224,6 +294,10 @@ def score_dip(symbol: str, history: pd.DataFrame) -> DipSignal | None:
         ml_confidence=ml_confidence,
         ml_buy_confirmed=ml_buy_confirmed,
         ml_auroc_cv=ml_auroc_cv,
+        ml_ks_cv=ml_ks_cv,
+        ml_elapsed_s=ml_elapsed_s,
+        multi_horizon=multi_horizon,
+        swing_metrics=swing_metrics,
     )
     logger.info(str(result))
     return result

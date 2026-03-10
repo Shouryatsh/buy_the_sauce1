@@ -199,8 +199,8 @@ WATCHLIST = [
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-SEP  = "─" * 100
-SEP2 = "═" * 100
+SEP  = "─" * 108
+SEP2 = "═" * 108
 
 # ── signal notes from DipSignal fields ───────────────────────────────────────
 def _signal_notes(s: DipSignal) -> str:
@@ -221,13 +221,43 @@ def _signal_notes(s: DipSignal) -> str:
 
 
 def _ml_tag(s: DipSignal) -> str:
-    """Short ML prediction string for the table, e.g. '↑78% HIGH'."""
+    """Short 5-day ML prediction string, e.g. '↑78% HIGH'."""
     if s.ml_direction is None:
         return "—"
     arrow = "↑" if s.ml_direction == "UP" else "↓"
     prob  = f"{s.ml_probability:.0%}" if s.ml_probability is not None else "?"
     conf  = s.ml_confidence or ""
     return f"{arrow}{prob} {conf}"
+
+
+def _horizon_cell(pred) -> str:
+    """Format a single MLPrediction for a horizon column, e.g. '↑62% MED'."""
+    if pred is None:
+        return "  n/a   "
+    arrow = "↑" if pred.direction == "UP" else "↓"
+    prob  = f"{pred.probability:.0%}"
+    conf  = pred.confidence[:3] if pred.confidence else "?"   # HIG/MED/LOW
+    return f"{arrow}{prob} {conf}"
+
+
+def _sell_tag(s: DipSignal) -> str:
+    """Sell recommendation + score from swing metrics."""
+    sm = s.swing_metrics
+    if sm is None:
+        return "—"
+    score = f"{sm.composite_sell_score:.0f}/100"
+    rec   = sm.sell_recommendation
+    # Add a coloured emoji hint that renders in any terminal
+    icons = {"STRONG_SELL": "🔴", "CONSIDER_SELL": "🟠", "HOLD": "🟡", "ADD": "🟢"}
+    return f"{icons.get(rec,'  ')} {rec} ({score})"
+
+
+def _atr_stops(s: DipSignal) -> str:
+    """Stop / target prices from ATR."""
+    sm = s.swing_metrics
+    if sm is None:
+        return "—"
+    return f"stop=${sm.atr_stop_price:.2f}  tgt=${sm.atr_target_price:.2f}  R/R={sm.reward_risk_ratio:.1f}x"
 
 
 # ── score bar e.g. "████░░" ──────────────────────────────────────────────────
@@ -272,12 +302,12 @@ def run_screen() -> None:
         })
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # TABLE 1 — DIP DETECTOR
+    # TABLE 1 — DIP DETECTOR  (entry signals)
     # ═══════════════════════════════════════════════════════════════════════════
     dip_hdr = (
-        f"{'SYMBOL':<8} {'SCORE':<8} {'BAR':<8} {'PRICE':>8} "
+        f"{'SYMBOL':<8} {'SCORE':<7} {'BAR':<6} {'PRICE':>8} "
         f"{'MA50':>8} {'MA200':>8} {'RSI':>6} {'52WK%':>7}  "
-        f"{'FUND':>5}  {'ML 5D':>10}  {'SRC':<8}  SIGNALS"
+        f"{'FUND':>5}  {'ML 1W':>10}  {'ML 1M':>10}  {'ML 1Y':>10}  {'SRC':<7}  SIGNALS"
     )
 
     dip_rows = []
@@ -290,16 +320,21 @@ def run_screen() -> None:
 
         if s is None:
             dip_rows.append(
-                f"{symbol:<8} {'N/A':<8} {'░░░░':<8} {'N/A':>8} "
+                f"{symbol:<8} {'N/A':<7} {'░░░░':<6} {'N/A':>8} "
                 f"{'—':>8} {'—':>8} {'—':>6} {'—':>7}  "
-                f"{fund_ok:>5}  {'—':>10}  {'no price data':<8}  —"
+                f"{fund_ok:>5}  {'—':>10}  {'—':>10}  {'—':>10}  {'no data':<7}  —"
             )
             continue
 
         rng_pct = (s.price - s.week52_low) / max(s.week52_high - s.week52_low, 1e-6) * 100
-        ml_str  = _ml_tag(s)
 
-        # Buy signal requires: dip ✅ + fundamentals ✅ + ML UP (if gating enabled)
+        # Multi-horizon cells
+        mh = s.multi_horizon
+        w1_cell = _horizon_cell(mh.week1  if mh else None)
+        m1_cell = _horizon_cell(mh.month1 if mh else None)
+        y1_cell = _horizon_cell(mh.year1  if mh else None)
+
+        # Buy signal logic (1W prediction gates buy, consistent with previous behaviour)
         ml_blocks  = config.ML_GATE_BUY_SIGNAL and s.ml_direction is not None and not s.ml_buy_confirmed
         full_buy   = s.is_dip and profile.passes and (not config.ML_GATE_BUY_SIGNAL or s.ml_buy_confirmed)
         dip_no_ml  = s.is_dip and profile.passes and config.ML_GATE_BUY_SIGNAL and ml_blocks
@@ -314,20 +349,23 @@ def run_screen() -> None:
             tag = ""
 
         dip_rows.append(
-            f"{symbol:<8} {s.score}/4{'':<4} {_bar(s.score):<8} "
+            f"{symbol:<8} {s.score}/4{'':<3} {_bar(s.score):<6} "
             f"{s.price:>8.2f} {s.ma50:>8.2f} {s.ma200:>8.2f} "
-            f"{s.rsi:>6.1f} {rng_pct:>6.0f}%  {fund_ok:>5}  {ml_str:>10}  {src:<8}  "
+            f"{s.rsi:>6.1f} {rng_pct:>6.0f}%  {fund_ok:>5}  "
+            f"{w1_cell:>10}  {m1_cell:>10}  {y1_cell:>10}  {src:<7}  "
             f"{_signal_notes(s)}{tag}"
         )
 
     sources_str = " + ".join(set(r.get("price_source", "unknown") for r in records))
-    ml_status   = f"ON (horizon={config.ML_PREDICT_HORIZON}d, gating={'ON' if config.ML_GATE_BUY_SIGNAL else 'OFF'})" if config.ML_ENABLED else "OFF"
+    ml_status   = f"ON (1W/1M/1Y horizons, gating={'ON' if config.ML_GATE_BUY_SIGNAL else 'OFF'})" if config.ML_ENABLED else "OFF"
     table1 = "\n".join([
         SEP2,
         f"  TABLE 1 — DIP DETECTOR  (sorted by dip score, best first)",
         f"  Price source : {sources_str}",
         f"  ML predictor : {ml_status}",
         f"  Thresholds   : RSI < {config.RSI_OVERSOLD} | price > {config.DIP_FROM_MA50_PCT:.0%} below MA50 | below MA200 | 52wk bottom {config.WEEK52_LOWER_BAND:.0%}",
+        f"  ML columns   : 1W = 5 trading days | 1M = 21 trading days | 1Y = 252 trading days",
+        f"                 ↑ = bullish (outperform SPY)  ↓ = bearish  HIG/MED/LOW = confidence",
         SEP2,
         dip_hdr,
         SEP,
@@ -371,6 +409,61 @@ def run_screen() -> None:
         SEP,
     ] + fund_rows + [SEP])
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # TABLE 3 — SWING / SELL METRICS  (for positions you already own)
+    # ═══════════════════════════════════════════════════════════════════════════
+    sw_hdr = (
+        f"{'SYMBOL':<8} {'SELL REC':<14} {'SCORE':>7}  "
+        f"{'RSI':>6} {'RSI SIG':<11} "
+        f"{'BB%B':>5} {'BB SIG':<11} "
+        f"{'MACD SIG':<13} "
+        f"{'vsMA50':>7} {'vsMA200':>8}  "
+        f"{'STOP $':>9} {'TGT $':>9} {'R/R':>5}  "
+        f"{'DRAWDN':>7} {'DAYS@HI':>8}  VOL"
+    )
+
+    sw_rows = []
+    for r in sorted(records, key=lambda x: (
+            x["signal"].swing_metrics.composite_sell_score
+            if (x["signal"] and x["signal"].swing_metrics) else -1
+        ), reverse=True):
+        s      = r["signal"]
+        symbol = r["symbol"]
+
+        if s is None or s.swing_metrics is None:
+            sw_rows.append(f"{symbol:<8} {'—':<14} {'—':>7}  — (no data)")
+            continue
+
+        sm  = s.swing_metrics
+        rsi_s  = f"{sm.rsi_14:.1f}"
+        bb_s   = f"{sm.bb_position:.2f}"
+        ma50_s = f"{sm.price_vs_ma50:+.1%}"  if not (sm.price_vs_ma50  != sm.price_vs_ma50) else "  n/a"
+        ma200_s= f"{sm.price_vs_ma200:+.1%}" if not (sm.price_vs_ma200 != sm.price_vs_ma200) else "  n/a"
+        dd_s   = f"{sm.drawdown_from_high:.1%}"
+
+        sw_rows.append(
+            f"{symbol:<8} {sm.sell_recommendation:<14} {sm.composite_sell_score:>6.0f}/100  "
+            f"{rsi_s:>6} {sm.rsi_signal:<11} "
+            f"{bb_s:>5} {sm.bb_signal:<11} "
+            f"{sm.macd_signal:<13} "
+            f"{ma50_s:>7} {ma200_s:>8}  "
+            f"${sm.atr_stop_price:>8.2f} ${sm.atr_target_price:>8.2f} {sm.reward_risk_ratio:>4.1f}x  "
+            f"{dd_s:>7} {sm.days_since_high:>8}d  {sm.vol_regime}"
+        )
+
+    table3 = "\n".join([
+        SEP2,
+        f"  TABLE 3 — SWING SELL METRICS  (sorted by sell pressure, highest first)",
+        f"  Use to decide WHEN to exit owned positions.",
+        f"  SELL REC  : STRONG_SELL ≥70 | CONSIDER_SELL ≥50 | HOLD ≥25 | ADD <25  (out of 100)",
+        f"  ATR STOP  : current price − 2×ATR(14)   |   ATR TARGET : current price + 3×ATR(14)",
+        f"  R/R       : reward-to-risk ratio (target dist / stop dist)",
+        f"  DRAWDN    : % below 252-day high         |   DAYS@HI : calendar days since 52w high",
+        SEP2,
+        sw_hdr,
+        SEP,
+    ] + sw_rows + [SEP])
+
     # ── summary ───────────────────────────────────────────────────────────────
     buy_both    = [
         r["symbol"] for r in records
@@ -387,14 +480,28 @@ def run_screen() -> None:
         r["symbol"] for r in records
         if r["signal"] and r["signal"].is_dip and not r["profile"].passes
     ]
+    strong_sell = [
+        r["symbol"] for r in records
+        if r["signal"] and r["signal"].swing_metrics
+        and r["signal"].swing_metrics.sell_recommendation == "STRONG_SELL"
+    ]
+    consider_sell = [
+        r["symbol"] for r in records
+        if r["signal"] and r["signal"].swing_metrics
+        and r["signal"].swing_metrics.sell_recommendation == "CONSIDER_SELL"
+    ]
 
     summary = "\n".join([
         SEP2,
         f"  SUMMARY — {date_str}  {time_str}",
         SEP2,
-        f"  🟢 BUY SIGNAL  (dip ✅ + fund ✅ + ML ✅) : {', '.join(buy_both)    if buy_both    else 'None today'}",
-        f"  🟡 DIP+FUND, ML caution (predicts DOWN)  : {', '.join(buy_ml_warn)  if buy_ml_warn else 'None'}  ← review ML signal",
-        f"  🟠 DIP ONLY    (dip ✅ + fund ❌)         : {', '.join(buy_diponly)  if buy_diponly else 'None'}  ← manual call",
+        f"  ─── BUY SIDE ────────────────────────────────────────────────────────────",
+        f"  🟢 BUY SIGNAL  (dip ✅ + fund ✅ + ML ✅) : {', '.join(buy_both)      if buy_both      else 'None today'}",
+        f"  🟡 DIP+FUND, ML caution (predicts DOWN)  : {', '.join(buy_ml_warn)    if buy_ml_warn   else 'None'}  ← review ML signal",
+        f"  🟠 DIP ONLY    (dip ✅ + fund ❌)         : {', '.join(buy_diponly)    if buy_diponly   else 'None'}  ← manual call",
+        f"  ─── SELL SIDE ───────────────────────────────────────────────────────────",
+        f"  🔴 STRONG SELL  (score ≥ 70)              : {', '.join(strong_sell)    if strong_sell   else 'None'}",
+        f"  🟠 CONSIDER SELL (score ≥ 50)             : {', '.join(consider_sell)  if consider_sell else 'None'}",
         SEP,
     ])
 
@@ -404,7 +511,7 @@ def run_screen() -> None:
         f"  Source : SEC EDGAR (fundamentals)  +  {sources_str} (prices)\n"
         f"  Tickers: {', '.join(WATCHLIST)}\n"
     )
-    output = f"{header}\n{table1}\n\n{table2}\n\n{summary}\n"
+    output = f"{header}\n{table1}\n\n{table2}\n\n{table3}\n\n{summary}\n"
 
     print(output)
 
@@ -417,7 +524,19 @@ def run_screen() -> None:
         "date","time","symbol","dip_score","is_dip","fund_pass",
         "price","ma50","ma200","rsi","week52_pct",
         "fcf_usd","fcf_yield_pct","profit_margin_pct","debt_to_equity","roe_pct","pe",
+        # ML: 5-day gate signal
         "ml_direction","ml_probability","ml_confidence","ml_buy_confirmed",
+        # ML: multi-horizon
+        "ml_1w_direction","ml_1w_prob","ml_1w_conf",
+        "ml_1m_direction","ml_1m_prob","ml_1m_conf",
+        "ml_1y_direction","ml_1y_prob","ml_1y_conf",
+        # Swing / sell metrics
+        "sell_rec","sell_score",
+        "rsi_14","rsi_signal","bb_position","bb_signal","macd_signal",
+        "price_vs_ma50","price_vs_ma200","trend_strength","vol_regime",
+        "atr_14","atr_stop","atr_target","reward_risk",
+        "drawdown_from_high","days_since_high",
+        # Meta
         "price_source","fail_reasons",
     ]
     csv_exists = os.path.exists(csv_path)
@@ -433,6 +552,16 @@ def run_screen() -> None:
                 (s.price - s.week52_low) / max(s.week52_high - s.week52_low, 1e-6) * 100
                 if s else ""
             )
+            mh = s.multi_horizon if s else None
+            sm = s.swing_metrics  if s else None
+
+            def _mp(pred, attr, fmt=None):
+                """Safe accessor for MLPrediction attributes."""
+                if pred is None: return ""
+                v = getattr(pred, attr, None)
+                if v is None: return ""
+                return f"{v:{fmt}}" if fmt else str(v)
+
             writer.writerow({
                 "date":               date_str,
                 "time":               time_str,
@@ -451,10 +580,39 @@ def run_screen() -> None:
                 "debt_to_equity":     f"{profile.debt_to_equity:.2f}"       if profile.debt_to_equity      is not None else "",
                 "roe_pct":            f"{profile.return_on_equity*100:.1f}" if profile.return_on_equity    is not None else "",
                 "pe":                 f"{pe_val:.1f}"                       if pe_val                      is not None else "",
+                # 5-day ML gate
                 "ml_direction":       s.ml_direction    if s else "",
                 "ml_probability":     f"{s.ml_probability:.3f}" if s and s.ml_probability is not None else "",
                 "ml_confidence":      s.ml_confidence   if s else "",
                 "ml_buy_confirmed":   s.ml_buy_confirmed if s else "",
+                # Multi-horizon
+                "ml_1w_direction":    _mp(mh.week1  if mh else None, "direction"),
+                "ml_1w_prob":         _mp(mh.week1  if mh else None, "probability", ".3f"),
+                "ml_1w_conf":         _mp(mh.week1  if mh else None, "confidence"),
+                "ml_1m_direction":    _mp(mh.month1 if mh else None, "direction"),
+                "ml_1m_prob":         _mp(mh.month1 if mh else None, "probability", ".3f"),
+                "ml_1m_conf":         _mp(mh.month1 if mh else None, "confidence"),
+                "ml_1y_direction":    _mp(mh.year1  if mh else None, "direction"),
+                "ml_1y_prob":         _mp(mh.year1  if mh else None, "probability", ".3f"),
+                "ml_1y_conf":         _mp(mh.year1  if mh else None, "confidence"),
+                # Swing metrics
+                "sell_rec":           sm.sell_recommendation           if sm else "",
+                "sell_score":         f"{sm.composite_sell_score:.1f}" if sm else "",
+                "rsi_14":             f"{sm.rsi_14:.1f}"               if sm else "",
+                "rsi_signal":         sm.rsi_signal                    if sm else "",
+                "bb_position":        f"{sm.bb_position:.3f}"          if sm else "",
+                "bb_signal":          sm.bb_signal                     if sm else "",
+                "macd_signal":        sm.macd_signal                   if sm else "",
+                "price_vs_ma50":      f"{sm.price_vs_ma50:.4f}"        if sm else "",
+                "price_vs_ma200":     f"{sm.price_vs_ma200:.4f}"       if sm else "",
+                "trend_strength":     f"{sm.trend_strength:.3f}"       if sm else "",
+                "vol_regime":         sm.vol_regime                    if sm else "",
+                "atr_14":             f"{sm.atr_14:.4f}"               if sm else "",
+                "atr_stop":           f"{sm.atr_stop_price:.2f}"       if sm else "",
+                "atr_target":         f"{sm.atr_target_price:.2f}"     if sm else "",
+                "reward_risk":        f"{sm.reward_risk_ratio:.2f}"    if sm else "",
+                "drawdown_from_high": f"{sm.drawdown_from_high:.4f}"   if sm else "",
+                "days_since_high":    sm.days_since_high               if sm else "",
                 "price_source":       r.get("price_source", ""),
                 "fail_reasons":       "; ".join(profile.fail_reasons),
             })

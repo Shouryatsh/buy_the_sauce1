@@ -89,7 +89,72 @@ def evaluate_symbol(symbol: str) -> tuple:
         return fundamental, None
 
     dip = score_dip(symbol, history)
+
+    # Surface multi-horizon outlook + swing metrics in logs
+    if dip is not None:
+        _log_outlook(dip)
+
     return fundamental, dip
+
+
+def _log_outlook(dip: DipSignal) -> None:
+    """Log multi-horizon ML outlook and swing sell metrics for a ticker."""
+    mh = dip.multi_horizon
+    if mh is not None:
+        logger.info(
+            "%s — Multi-horizon outlook:\n"
+            "  1W : %-4s  p=%-4s  [%s]%s\n"
+            "  1M : %-4s  p=%-4s  [%s]%s\n"
+            "  1Y : %-4s  p=%-4s  [%s]%s",
+            dip.symbol,
+            _pred_dir(mh.week1),  _pred_prob(mh.week1),  _pred_conf(mh.week1),  _pred_auroc(mh.week1),
+            _pred_dir(mh.month1), _pred_prob(mh.month1), _pred_conf(mh.month1), _pred_auroc(mh.month1),
+            _pred_dir(mh.year1),  _pred_prob(mh.year1),  _pred_conf(mh.year1),  _pred_auroc(mh.year1),
+        )
+
+    sm = dip.swing_metrics
+    if sm is not None:
+        logger.info(
+            "%s — Swing sell metrics:\n"
+            "  RSI-14        : %.1f  [%s]\n"
+            "  Bollinger %%B  : %.2f  [%s]\n"
+            "  MACD hist     : %+.6f  [%s]\n"
+            "  vs MA-50      : %+.1f%%\n"
+            "  vs MA-200     : %+.1f%%\n"
+            "  Trend strength: %.2f   Vol regime: %s\n"
+            "  ATR-14 (norm) : %.2f%%\n"
+            "  Stop  (2×ATR) : $%.2f\n"
+            "  Target (3×ATR): $%.2f   R/R = %.1f\n"
+            "  Days since 52w high: %d   Drawdown: %.1f%%\n"
+            "  ─── Sell score: %.0f/100  →  %s",
+            sm.symbol,
+            sm.rsi_14, sm.rsi_signal,
+            sm.bb_position, sm.bb_signal,
+            sm.macd_hist, sm.macd_signal,
+            sm.price_vs_ma50  * 100 if not (sm.price_vs_ma50  != sm.price_vs_ma50) else float("nan"),
+            sm.price_vs_ma200 * 100 if not (sm.price_vs_ma200 != sm.price_vs_ma200) else float("nan"),
+            sm.trend_strength, sm.vol_regime,
+            sm.atr_14 * 100,
+            sm.atr_stop_price,
+            sm.atr_target_price, sm.reward_risk_ratio,
+            sm.days_since_high, sm.drawdown_from_high * 100,
+            sm.composite_sell_score, sm.sell_recommendation,
+        )
+
+
+# ── Helper formatters ──────────────────────────────────────────────────────
+
+def _pred_dir(p) -> str:
+    return p.direction if p else "n/a"
+
+def _pred_prob(p) -> str:
+    return f"{p.probability:.0%}" if p else "—"
+
+def _pred_conf(p) -> str:
+    return p.confidence if p else "—"
+
+def _pred_auroc(p) -> str:
+    return f"  AUROC={p.auroc_cv:.3f}" if (p and p.auroc_cv is not None) else ""
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +182,12 @@ def run_scan(dry_run: bool = False) -> list:
         _, dip = evaluate_symbol(symbol)
         if dip is not None and dip.is_dip:
             candidates.append(dip)
-            logger.info("%s: DIP CANDIDATE (score=%d)", symbol, dip.score)
+            logger.info(
+                "%s: DIP CANDIDATE (score=%d) | ML=%s | Sell=%s",
+                symbol, dip.score,
+                dip.ml_direction or "n/a",
+                dip.swing_metrics.sell_recommendation if dip.swing_metrics else "n/a",
+            )
 
     logger.info("=== %d dip candidate(s) found ===", len(candidates))
 
