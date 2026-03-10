@@ -59,6 +59,7 @@ class DipSignal:
     ml_probability: float | None = None # probability of predicted direction
     ml_confidence: str | None = None    # "HIGH" | "MEDIUM" | "LOW" | None
     ml_buy_confirmed: bool = False      # True when ML predicts UP with >= MEDIUM confidence
+    ml_auroc_cv: float | None = None    # walk-forward CV AUROC (if computed)
 
     def __str__(self) -> str:
         signals = []
@@ -181,15 +182,21 @@ def score_dip(symbol: str, history: pd.DataFrame) -> DipSignal | None:
     ml_probability  = None
     ml_confidence   = None
     ml_buy_confirmed = False
+    ml_auroc_cv     = None
 
     if config.ML_ENABLED:
         try:
             from ml_predictor import predict as ml_predict
-            ml_pred = ml_predict(symbol, history)
+            ml_pred = ml_predict(
+                symbol,
+                history,
+                compute_cv_auroc=getattr(config, "ML_COMPUTE_CV_AUROC", False),
+            )
             if ml_pred is not None:
                 ml_direction   = ml_pred.direction
                 ml_probability = ml_pred.probability
                 ml_confidence  = ml_pred.confidence
+                ml_auroc_cv    = getattr(ml_pred, "auroc_cv", None)
                 # Confirmed = ML predicts UP with at least MEDIUM confidence
                 ml_buy_confirmed = (
                     ml_pred.direction == "UP"
@@ -216,6 +223,7 @@ def score_dip(symbol: str, history: pd.DataFrame) -> DipSignal | None:
         ml_probability=ml_probability,
         ml_confidence=ml_confidence,
         ml_buy_confirmed=ml_buy_confirmed,
+        ml_auroc_cv=ml_auroc_cv,
     )
     logger.info(str(result))
     return result

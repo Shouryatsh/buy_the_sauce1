@@ -66,15 +66,21 @@ MAX_CAPEX_TO_FCF: float = 0.75      # Capex ≤ 75% of FCF
 #   (BRK-B railroads, META AI infra).  75% still screens out cash-incinerators.
 
 # ---------------------------------------------------------------------------
-# ML predictor  (ml_predictor.py)
+# ML predictor  (ml_predictor.py) — Ensemble (LightGBM + LogReg + SGD stacking)
 # ---------------------------------------------------------------------------
 ML_ENABLED: bool = True              # Set False to skip ML entirely (faster)
 ML_PREDICT_HORIZON: int = 5          # Predict price direction N days ahead
 ML_TRAIN_SPLIT: float = 0.80         # 80% of history used for training
 ML_MIN_TRAIN_SAMPLES: int = 150      # Skip ML if fewer clean samples available
+
+# Legacy Random Forest params (kept for reference / fallback):
 ML_N_ESTIMATORS: int = 200           # Random Forest trees
 ML_MAX_DEPTH: int = 6                # Max tree depth (controls overfitting)
 ML_MIN_SAMPLES_LEAF: int = 10        # Minimum samples per leaf (controls overfitting)
+
+# Ensemble-specific: set True to run 5-fold walk-forward CV AUROC per ticker
+# (adds ~3-5s per ticker — disable in production, enable for evaluation runs)
+ML_COMPUTE_CV_AUROC: bool = False
 
 # Confidence thresholds (probability of predicted class)
 ML_HIGH_CONFIDENCE_THRESHOLD: float   = 0.65   # ≥ 65% → HIGH
