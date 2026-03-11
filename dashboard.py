@@ -126,11 +126,13 @@ def _delete_trade(idx: int):
 # ---------------------------------------------------------------------------
 
 def _check_ibkr_status() -> tuple[bool, str]:
-    """Return (connected: bool, message: str) for IBKR TWS/Gateway.
+    """Return (connected: bool, message: str) for IBKR TWS/Gateway."""
+    try:
+        import importlib
+        importlib.import_module("ib_insync")
+    except ImportError:
+        return False, f"⚠️  ib_insync not installed — yfinance fallback active"
 
-    Creates its own asyncio event loop so it works safely from any thread
-    (including Dash worker threads that have no loop by default).
-    """
     import asyncio, random
 
     async def _ping():
@@ -155,11 +157,11 @@ def _check_ibkr_status() -> tuple[bool, str]:
 
         if connected:
             return True, f"✅ IBKR Connected  ({addr})"
-        return False, f"❌ IBKR Not Connected  ({addr})"
+        return False, f"❌ IBKR Not Connected  ({addr}) — is TWS / Gateway running?"
     except Exception as exc:
         if "already in use" in str(exc).lower():
             return True, f"✅ IBKR Connected  ({addr})"
-        return False, f"❌ IBKR Unavailable ({addr}) — {type(exc).__name__}  →  yfinance fallback active"
+        return False, f"❌ IBKR Unavailable ({addr}) — TWS/Gateway not running → yfinance fallback active"
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +218,7 @@ def fetch_screen_data() -> list[dict]:
 
 
 def _records_to_df(records: list[dict]) -> pd.DataFrame:
-    """Flatten screener records into a display DataFrame."""
+    """Flatten screener records into a display DataFrame for the screener table."""
     rows = []
     for r in records:
         s   = r["signal"]
@@ -236,11 +238,42 @@ def _records_to_df(records: list[dict]) -> pd.DataFrame:
         ml_ok     = s.ml_buy_confirmed      if s else False
 
         fund_pass = p.passes
-        margin    = round(p.profit_margin * 100, 1)  if p.profit_margin  is not None else None
-        de        = round(p.debt_to_equity, 2)        if p.debt_to_equity is not None else None
+        margin    = round(p.profit_margin * 100, 1)   if p.profit_margin   is not None else None
+        de        = round(p.debt_to_equity, 2)         if p.debt_to_equity  is not None else None
         roe       = round(p.return_on_equity * 100, 1) if p.return_on_equity is not None else None
-        fcf_b     = round(p.free_cash_flow / 1e9, 2) if p.free_cash_flow is not None else None
+        fcf_b     = round(p.free_cash_flow / 1e9, 2)  if p.free_cash_flow  is not None else None
         pe        = round(r["info"].get("trailingPE") or r["info"].get("forwardPE") or 0, 1) or None
+
+        # ── Multi-horizon cells ───────────────────────────────────────────────
+        def _hcell(pred):
+            if pred is None: return "n/a"
+            arrow = "↑" if pred.direction == "UP" else "↓"
+            conf  = (pred.confidence or "")[:3]
+            return f"{arrow}{pred.probability:.0%} {conf}"
+
+        mh    = getattr(s, "multi_horizon", None) if s else None
+        ml_1w = _hcell(mh.week1  if mh else None)
+        ml_1m = _hcell(mh.month1 if mh else None)
+        ml_1y = _hcell(mh.year1  if mh else None)
+
+        # ── Swing metrics ─────────────────────────────────────────────────────
+        sm = getattr(s, "swing_metrics", None) if s else None
+
+        sell_rec   = sm.sell_recommendation              if sm else None
+        sell_score = round(sm.composite_sell_score, 0)  if sm else None
+        rsi14      = round(sm.rsi_14, 1)                if sm else None
+        rsi_sig    = sm.rsi_signal                       if sm else None
+        bb_pos     = round(sm.bb_position, 2)            if sm else None
+        bb_sig     = sm.bb_signal                        if sm else None
+        macd_sig   = sm.macd_signal                      if sm else None
+        vs_ma50    = f"{sm.price_vs_ma50:+.1%}"          if sm and sm.price_vs_ma50  == sm.price_vs_ma50  else None
+        vs_ma200   = f"{sm.price_vs_ma200:+.1%}"         if sm and sm.price_vs_ma200 == sm.price_vs_ma200 else None
+        atr_stop   = round(sm.atr_stop_price, 2)         if sm else None
+        atr_tgt    = round(sm.atr_target_price, 2)       if sm else None
+        rr         = round(sm.reward_risk_ratio, 1)      if sm else None
+        drawdn     = f"{sm.drawdown_from_high:.1%}"       if sm else None
+        days_hi    = sm.days_since_high                   if sm else None
+        vol_reg    = sm.vol_regime                        if sm else None
 
         # Signal label
         if is_dip and fund_pass and (not config.ML_GATE_BUY_SIGNAL or not config.ML_ENABLED or ml_ok):
@@ -253,22 +286,42 @@ def _records_to_df(records: list[dict]) -> pd.DataFrame:
             signal_label = "⚪ WATCH"
 
         rows.append({
+            # ── TABLE 1: Dip detector ─────────────────────────────────────────
             "Symbol":     sym,
             "Signal":     signal_label,
             "Score":      f"{score}/4" if score is not None else "—",
             "Price":      price,
             "RSI":        rsi,
-            "vs MA50%":   round((price - ma50) / ma50 * 100, 1) if price and ma50 else None,
+            "vs MA50%":   round((price - ma50)  / ma50  * 100, 1) if price and ma50  else None,
             "vs MA200%":  round((price - ma200) / ma200 * 100, 1) if price and ma200 else None,
             "52wk%":      rng_pct,
             "Fund":       "✅" if fund_pass else "❌",
-            "ML 5d":      f"{'↑' if ml_dir=='UP' else '↓' if ml_dir else '—'}{int(ml_prob) if ml_prob else ''}% {ml_conf or ''}".strip() if ml_dir else "—",
+            "ML 1W":      ml_1w,
+            "ML 1M":      ml_1m,
+            "ML 1Y":      ml_1y,
+            # ── TABLE 1 extras ────────────────────────────────────────────────
             "Margin%":    margin,
             "D/E":        de,
             "ROE%":       roe,
             "FCF $B":     fcf_b,
             "P/E":        pe,
             "Src":        r["price_source"],
+            # ── TABLE 3: Swing sell metrics ───────────────────────────────────
+            "Sell Rec":   sell_rec,
+            "Sell Score": sell_score,
+            "RSI-14":     rsi14,
+            "RSI Sig":    rsi_sig,
+            "BB%B":       bb_pos,
+            "BB Sig":     bb_sig,
+            "MACD Sig":   macd_sig,
+            "vs MA50":    vs_ma50,
+            "vs MA200":   vs_ma200,
+            "Stop $":     atr_stop,
+            "Target $":   atr_tgt,
+            "R/R":        rr,
+            "Drawdown":   drawdn,
+            "Days@Hi":    days_hi,
+            "Vol":        vol_reg,
             # internal — used for risk tab
             "_is_dip":    is_dip,
             "_fund_pass": fund_pass,
@@ -464,13 +517,49 @@ def _screener_layout():
             ),
         ], className="mb-3"),
 
-        # stat cards
+        # stat cards row
         dbc.Row(id="stat-cards", className="mb-3"),
 
-        # main table
-        _card(html.Div(id="screener-table-container",
-                        children=html.Div("Click 🔄 Refresh to load live data.",
-                                          style={"color": MUTED, "fontFamily": "monospace"}))),
+        # ── TABLE 1: Dip Detector ─────────────────────────────────────────────
+        _card([
+            html.H6("📡 TABLE 1 — Dip Detector + ML Outlook",
+                    style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+            html.Div(
+                "Sorted by dip score. ML 1W=5d / 1M=21d / 1Y=252d vs SPY.  ↑ = bullish  ↓ = bearish",
+                style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+            ),
+            html.Div(id="screener-table-container",
+                     children=html.Div("Click 🔄 Refresh to load live data.",
+                                       style={"color": MUTED, "fontFamily": "monospace"})),
+        ]),
+
+        # ── TABLE 2: Fundamentals ─────────────────────────────────────────────
+        _card([
+            html.H6("📊 TABLE 2 — Fundamental Quality Screen",
+                    style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+            html.Div(
+                "FCF, yield, profit margin, D/E, ROE, P/E — PASS = cleared all filters",
+                style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+            ),
+            html.Div(id="fund-table-container",
+                     children=html.Div("Waiting for refresh…",
+                                       style={"color": MUTED, "fontFamily": "monospace"})),
+        ]),
+
+        # ── TABLE 3: Swing Sell Metrics ───────────────────────────────────────
+        _card([
+            html.H6("📉 TABLE 3 — Swing Sell Metrics",
+                    style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+            html.Div(
+                "Sorted by sell pressure (highest first).  "
+                "Stop=price−2×ATR  Target=price+3×ATR  "
+                "STRONG_SELL≥70 | CONSIDER_SELL≥50 | HOLD≥25 | ADD<25",
+                style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+            ),
+            html.Div(id="swing-table-container",
+                     children=html.Div("Waiting for refresh…",
+                                       style={"color": MUTED, "fontFamily": "monospace"})),
+        ]),
     ])
 
 
@@ -1077,64 +1166,115 @@ def render_tab(active_tab, store_data, trades_store):
 
 
 @app.callback(
-    Output("screen-store",           "data"),
+    Output("screen-store",            "data"),
     Output("screener-table-container","children"),
-    Output("stat-cards",             "children"),
-    Output("refresh-status",         "children"),
-    Output("last-refresh-label",     "children"),
-    Output("ibkr-status-label",      "children"),
-    Input("refresh-btn",             "n_clicks"),
+    Output("fund-table-container",    "children"),
+    Output("swing-table-container",   "children"),
+    Output("stat-cards",              "children"),
+    Output("refresh-status",          "children"),
+    Output("last-refresh-label",      "children"),
+    Output("ibkr-status-label",       "children"),
+    Input("refresh-btn",              "n_clicks"),
     prevent_initial_call=True,
 )
 def refresh_screener(n_clicks):
-    """Re-run the screener pipeline and update the table + store."""
+    """Re-run the screener pipeline and update all three tables + store."""
     global _last_fetch
 
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # Check IBKR status first (non-blocking)
     ibkr_ok, ibkr_msg = _check_ibkr_status()
+    ibkr_colour = GREEN if ibkr_ok else YELLOW
 
     try:
         records  = fetch_screen_data()
         df       = _records_to_df(records)
         _last_fetch = {"records": records, "df": df}
     except Exception as exc:
-        return (
-            dash.no_update, dash.no_update, dash.no_update,
-            html.Span(f"❌ Error: {exc}", style={"color": RED}),
-            f"Last refresh: {ts}",
-            html.Span(ibkr_msg, style={"color": GREEN if ibkr_ok else YELLOW}),
-        )
+        err = html.Span(f"❌ Error: {exc}", style={"color": RED})
+        no = dash.no_update
+        return no, no, no, no, no, err, f"Last refresh: {ts}", html.Span(ibkr_msg, style={"color": ibkr_colour})
 
-    # Count price sources to display in status
-    src_counts = df["Src"].value_counts().to_dict() if "Src" in df.columns else {}
+    hide_internal = ["_is_dip", "_fund_pass", "_ml_ok", "_price"]
+
+    # ── TABLE 1: Dip Detector — entry signals ────────────────────────────────
+    t1_cols = ["Symbol","Signal","Score","Price","RSI","vs MA50%","vs MA200%",
+               "52wk%","Fund","ML 1W","ML 1M","ML 1Y","Src"]
+    t1_df = df[t1_cols].sort_values(
+        "Score", ascending=False,
+        key=lambda s: s.str.extract(r"(\d)")[0].astype(float),
+    )
+    t1 = _make_table(t1_df, "screener-table")
+
+    # ── TABLE 2: Fundamentals ─────────────────────────────────────────────────
+    t2_cols = ["Symbol","Fund","Margin%","D/E","ROE%","FCF $B","P/E","Signal"]
+    t2_df = df[t2_cols].copy()
+    t2 = _make_table(t2_df, "fund-table")
+
+    # ── TABLE 3: Swing Sell Metrics — sorted by sell pressure ─────────────────
+    t3_cols = ["Symbol","Sell Rec","Sell Score","RSI-14","RSI Sig",
+               "BB%B","BB Sig","MACD Sig","vs MA50","vs MA200",
+               "Stop $","Target $","R/R","Drawdown","Days@Hi","Vol"]
+    t3_df = df[t3_cols].copy()
+    # Sort: highest sell score first (numeric sort)
+    t3_df = t3_df.sort_values("Sell Score", ascending=False, na_position="last")
+
+    # Colour-code sell recommendation cells
+    sell_colours = [
+        {"if": {"filter_query": '{Sell Rec} = "STRONG_SELL"',   "column_id": "Sell Rec"}, "color": RED,    "fontWeight": "bold"},
+        {"if": {"filter_query": '{Sell Rec} = "CONSIDER_SELL"', "column_id": "Sell Rec"}, "color": "#f0883e", "fontWeight": "bold"},
+        {"if": {"filter_query": '{Sell Rec} = "HOLD"',          "column_id": "Sell Rec"}, "color": YELLOW},
+        {"if": {"filter_query": '{Sell Rec} = "ADD"',           "column_id": "Sell Rec"}, "color": GREEN},
+        {"if": {"filter_query": '{RSI Sig} = "OVERBOUGHT"',     "column_id": "RSI Sig"},  "color": RED},
+        {"if": {"filter_query": '{RSI Sig} = "OVERSOLD"',       "column_id": "RSI Sig"},  "color": GREEN},
+        {"if": {"filter_query": '{BB Sig} = "EXTENDED"',        "column_id": "BB Sig"},   "color": RED},
+        {"if": {"filter_query": '{BB Sig} = "COMPRESSED"',      "column_id": "BB Sig"},   "color": GREEN},
+        {"if": {"filter_query": '{MACD Sig} = "BEARISH_CROSS"', "column_id": "MACD Sig"}, "color": RED},
+        {"if": {"filter_query": '{MACD Sig} = "BULLISH"',       "column_id": "MACD Sig"}, "color": GREEN},
+        {"if": {"filter_query": "{Sell Score} >= 70",           "column_id": "Sell Score"}, "color": RED,   "fontWeight": "bold"},
+        {"if": {"filter_query": "{Sell Score} >= 50 && {Sell Score} < 70", "column_id": "Sell Score"}, "color": "#f0883e"},
+        {"if": {"filter_query": "{Sell Score} < 25",            "column_id": "Sell Score"}, "color": GREEN},
+        {"if": {"filter_query": '{Vol} = "HIGH"',               "column_id": "Vol"},       "color": RED},
+        {"if": {"filter_query": '{Vol} = "LOW"',                "column_id": "Vol"},       "color": GREEN},
+    ]
+    t3 = dash_table.DataTable(
+        id="swing-table",
+        columns=[{"name": c, "id": c} for c in t3_df.columns],
+        data=t3_df.to_dict("records"),
+        style_cell=_CELL_STYLE,
+        style_header=_HDR_STYLE,
+        style_data_conditional=sell_colours,
+        style_table={"overflowX": "auto", "borderRadius": "6px"},
+        sort_action="native",
+        filter_action="native",
+        page_size=40,
+    )
+
+    # ── stat cards ────────────────────────────────────────────────────────────
+    src_counts  = df["Src"].value_counts().to_dict() if "Src" in df.columns else {}
     src_summary = "  ".join(f"{src}:{cnt}" for src, cnt in src_counts.items())
-
-    # stat cards
     n_buy   = df["Signal"].str.contains("BUY").sum()
     n_dip   = df["Signal"].str.contains("DIP").sum()
     n_watch = df["Signal"].str.contains("WATCH").sum()
+    n_strong_sell   = (df["Sell Rec"] == "STRONG_SELL").sum()
+    n_consider_sell = (df["Sell Rec"] == "CONSIDER_SELL").sum()
 
     stat_cards = dbc.Row([
-        _stat_card("🟢 Buy Signals",  str(n_buy),               GREEN),
-        _stat_card("🟡 Dip Alerts",   str(n_dip),               YELLOW),
-        _stat_card("⚪ Watch",         str(n_watch),             MUTED),
-        _stat_card("Tickers Scanned", str(len(df)),              ACCENT),
-        _stat_card("Price Sources",   src_summary or "—",        MUTED),
-        _stat_card("Last Refresh",    ts,                        MUTED),
+        _stat_card("🟢 Buy Signals",    str(n_buy),               GREEN),
+        _stat_card("🟡 Dip Alerts",     str(n_dip),               YELLOW),
+        _stat_card("⚪ Watch",           str(n_watch),             MUTED),
+        _stat_card("🔴 Strong Sell",    str(n_strong_sell),       RED),
+        _stat_card("🟠 Consider Sell",  str(n_consider_sell),     "#f0883e"),
+        _stat_card("Tickers Scanned",   str(len(df)),             ACCENT),
+        _stat_card("Price Sources",     src_summary or "—",       MUTED),
     ])
-
-    hide = ["_is_dip", "_fund_pass", "_ml_ok", "_price"]
-    table = _make_table(df, "screener-table", hide_cols=hide)
 
     return (
         df.to_dict("records"),
-        table,
+        t1, t2, t3,
         stat_cards,
         html.Span(f"✅ Updated {ts}", style={"color": GREEN}),
         f"Last refresh: {ts}",
-        html.Span(ibkr_msg, style={"color": GREEN if ibkr_ok else YELLOW}),
+        html.Span(ibkr_msg, style={"color": ibkr_colour}),
     )
 
 
