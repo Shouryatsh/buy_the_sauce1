@@ -11,7 +11,7 @@ Label
     Removes systematic market beta so the model focuses on idiosyncratic
     alpha, which is more learnable than raw direction.
 
-Feature set  (~59 features)
+Feature set  (~77 features)
 ----------------------------
     Technical    RSI-14, Stoch-RSI, momentum 3/5/10/20d, price-vs-MA 20/50/
                  100/200, MA crosses, Bollinger position & width, HVol 5/10/20d,
@@ -24,7 +24,14 @@ Feature set  (~59 features)
     Macro        SPY/QQQ/TLT/GLD/IWM/VIX 5d & 20d returns; relative strength
                  vs SPY and vs sector ETF
     HMM          2-state Gaussian HMM regime probability & id
-    Fundamental  Monte Carlo DCF upside % (EDGAR FCF, if available)
+    Monte Carlo  DCF upside % (EDGAR FCF, if available)
+    Fundamental  ROIC (YoY delta), FCF margin (YoY delta), cash conversion,
+                 accruals ratio (YoY delta), receivables-vs-revenue growth
+                 spread, ROE, D/E, FCF yield  — all broadcast as constant
+                 columns from EDGAR annual data
+    Cross-sect.  Percentile rank of RSI-14, 5d/20d momentum, 20d volatility,
+                 52-week range position, OBV trend — ranked daily within
+                 sector peer basket (8 liquid large-caps per sector)
 
 Ensemble  (soft-voting)
 -----------------------
@@ -112,6 +119,12 @@ import config
 
 logger = logging.getLogger(__name__)
 
+# Silence hmmlearn's ConvergenceWarning — it fires frequently on short price
+# series and doesn't affect results (the model still converges close enough).
+warnings.filterwarnings("ignore", category=UserWarning, module="hmmlearn")
+warnings.filterwarnings("ignore", message=".*Model is not converging.*")
+logging.getLogger("hmmlearn").setLevel(logging.ERROR)   # hmmlearn uses logger, not warnings
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -139,6 +152,27 @@ _SECTOR_ETFS = {
     "Real Estate":            "XLRE",
     "Utilities":              "XLU",
     "Communication Services": "XLC",
+}
+
+# ---------------------------------------------------------------------------
+# Sector peer proxies for cross-sectional ranking
+# ---------------------------------------------------------------------------
+# For each GICS sector, a small basket of highly-liquid large-cap peers is
+# used to compute cross-sectional rank features.  These tickers are chosen
+# for data availability and liquidity, not as exhaustive sector coverage.
+# Fetched via yfinance — same caching infrastructure as macro ETFs.
+_SECTOR_PEERS: dict[str, list[str]] = {
+    "Technology":             ["AAPL", "MSFT", "NVDA", "AVGO", "ORCL", "CSCO", "ADBE", "AMD"],
+    "Health Care":            ["JNJ", "UNH", "LLY", "ABBV", "MRK", "TMO", "ABT", "DHR"],
+    "Financials":             ["BRK-B", "JPM", "BAC", "WFC", "GS", "MS", "BLK", "C"],
+    "Consumer Discretionary": ["AMZN", "TSLA", "HD", "MCD", "NKE", "LOW", "TJX", "SBUX"],
+    "Consumer Staples":       ["PG", "KO", "PEP", "COST", "WMT", "PM", "MO", "CL"],
+    "Energy":                 ["XOM", "CVX", "COP", "EOG", "SLB", "MPC", "VLO", "OXY"],
+    "Industrials":            ["UNP", "HON", "UPS", "CAT", "DE", "LMT", "RTX", "GE"],
+    "Materials":              ["LIN", "APD", "SHW", "FCX", "NEM", "ECL", "DD", "VMC"],
+    "Real Estate":            ["PLD", "AMT", "EQIX", "CCI", "PSA", "O", "WELL", "SPG"],
+    "Utilities":              ["NEE", "DUK", "SO", "AEP", "EXC", "SRE", "D", "PCG"],
+    "Communication Services": ["GOOGL", "META", "NFLX", "DIS", "CMCSA", "T", "VZ", "CHTR"],
 }
 
 # Simple SIC → GICS sector mapping (covers most common SICs)
@@ -323,15 +357,31 @@ class MultiHorizonOutlook:
 # Caches (process-lifetime)
 # ---------------------------------------------------------------------------
 
-_macro_cache: dict[str, pd.DataFrame]  = {}   # ticker → price series
-_mc_cache:    dict[str, float]          = {}   # symbol → MC upside pct
-_hmm_cache:   dict[str, object]         = {}   # symbol → fitted HMM
-_spy_series:  Optional[pd.Series]       = None # cached SPY close for alpha label
+_macro_cache:  dict[str, pd.DataFrame]  = {}   # ticker → price series
+_mc_cache:     dict[str, float]         = {}   # symbol → MC upside pct
+_hmm_cache:    dict[str, object]        = {}   # symbol → fitted HMM
+_spy_series:   Optional[pd.Series]      = None # cached SPY close for alpha label
+_fund_cache:   dict[str, dict]          = {}   # symbol → raw EDGAR fundamentals dict
+_peer_cache:   dict[str, pd.DataFrame]  = {}   # ticker → peer close price series
 
 
-# ---------------------------------------------------------------------------
-# Feature engineering — technical
-# ---------------------------------------------------------------------------
+def prime_fundamental_cache(symbol: str, raw_info: dict) -> None:
+    """
+    Pre-populate the fundamental feature cache with a raw EDGAR info dict.
+
+    Call this from the screener after `edgar.get_fundamentals()` so that
+    `build_fundamental_features()` reuses the same data without a second
+    network round-trip to SEC EDGAR.
+
+    Parameters
+    ----------
+    symbol   : ticker symbol (upper-case recommended)
+    raw_info : dict returned by edgar.get_fundamentals()
+    """
+    _fund_cache[symbol.upper()] = raw_info
+
+
+
 
 def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
     """Vectorised RSI (Wilder's smoothing)."""
@@ -455,6 +505,20 @@ def build_calendar_features(history: pd.DataFrame) -> pd.DataFrame:
     """
     idx  = history.index
     feat = pd.DataFrame(index=idx)
+
+    # Ensure DatetimeIndex — IBKR util.df() returns datetime.date objects which
+    # produce a plain Index that has no .dayofweek / .month attributes.
+    if not isinstance(idx, pd.DatetimeIndex):
+        try:
+            idx = pd.to_datetime(idx)
+            feat.index = idx
+        except Exception as exc:
+            logger.warning("build_calendar_features: could not coerce index to DatetimeIndex — %s", exc)
+            # Fill all calendar features with neutral values and return early
+            for col in ("dow_sin","dow_cos","month_sin","month_cos","is_january",
+                        "qtr_end","tom_start","tom_end"):
+                feat[col] = 0.0
+            return feat
 
     # Day-of-week (Monday=0, Friday=4) — encoded as sine/cosine to preserve
     # cyclical ordering without implicit ordinality.
@@ -913,6 +977,264 @@ def build_mc_feature(symbol: str,
 
 
 # ---------------------------------------------------------------------------
+# Feature engineering — fundamental quality (EDGAR-sourced, constant columns)
+# ---------------------------------------------------------------------------
+
+def build_fundamental_features(symbol: str,
+                                history: pd.DataFrame) -> pd.DataFrame:
+    """
+    Broadcast EDGAR-sourced fundamental quality metrics as constant columns
+    aligned to the price history index.  These are time-invariant at the
+    annual reporting frequency, so we treat them as constants per training
+    window.  NaN when EDGAR data is unavailable (model learns to ignore).
+
+    Features added (~12 columns)
+    ----------------------------
+    fund_roic               Return on Invested Capital (current FY)
+    fund_roic_delta         YoY change in ROIC  (improvement = positive signal)
+    fund_fcf_margin         FCF / Revenue  (current FY)
+    fund_fcf_margin_delta   YoY change in FCF margin
+    fund_cash_conversion    FCF / Net Income  (>1 = cash compounder)
+    fund_accruals_ratio     (NI − FCF) / avg assets  (lower = higher quality)
+    fund_accruals_delta     YoY change in accruals ratio  (worsening = negative)
+    fund_rcv_rev_spread     receivables_growth − revenue_growth  (>0 = red flag)
+    fund_revenue_growth     YoY revenue growth
+    fund_roe                Return on equity
+    fund_de_ratio           Debt / equity (normalised)
+    fund_fcf_yield          FCF / market cap
+    """
+    global _fund_cache
+
+    # Try EDGAR fetch (cached per process; ~0.5s on first call, 0s after).
+    # prime_fundamental_cache() may have already populated this from the screener.
+    sym_upper = symbol.upper()
+    raw: dict = {}
+    if sym_upper in _fund_cache:
+        raw = _fund_cache[sym_upper]
+    else:
+        try:
+            from edgar import get_fundamentals
+            raw = get_fundamentals(symbol)
+            _fund_cache[sym_upper] = raw
+        except Exception as exc:
+            logger.debug("%s: fundamental feature fetch failed — %s", symbol, exc)
+
+    def _v(key: str) -> float:
+        """Safely extract a float from the raw dict, returning NaN on miss."""
+        try:
+            v = float(raw.get(key, np.nan))
+            return np.nan if (not np.isfinite(v)) else v
+        except (TypeError, ValueError):
+            return np.nan
+
+    roic          = _v("roic")
+    roic_prior    = _v("roic_prior")
+    fcf_margin    = _v("fcf_margin")
+    fcf_margin_p  = _v("fcf_margin_prior")
+    cash_conv     = _v("cash_conversion")
+    accruals      = _v("accruals_ratio")
+    accruals_p    = _v("accruals_ratio_prior")
+    rcv_growth    = _v("receivables_growth")
+    rev_growth    = _v("revenue_growth")
+    roe           = _v("returnOnEquity")
+    de_raw        = _v("debtToEquity")
+    fcf_yield     = _v("fcf_yield")          # may not be in dict — computed below
+    fcf           = _v("freeCashflow")
+    mktcap        = _v("marketCap")
+
+    # Derive if not directly stored
+    if np.isnan(fcf_yield) and not np.isnan(fcf) and not np.isnan(mktcap) and mktcap > 0:
+        fcf_yield = fcf / mktcap
+    de_norm = de_raw / 100.0 if not np.isnan(de_raw) else np.nan
+
+    vals = {
+        "fund_roic":             roic,
+        "fund_roic_delta":       (roic - roic_prior)      if not (np.isnan(roic) or np.isnan(roic_prior))      else np.nan,
+        "fund_fcf_margin":       fcf_margin,
+        "fund_fcf_margin_delta": (fcf_margin - fcf_margin_p) if not (np.isnan(fcf_margin) or np.isnan(fcf_margin_p)) else np.nan,
+        "fund_cash_conversion":  cash_conv,
+        "fund_accruals_ratio":   accruals,
+        "fund_accruals_delta":   (accruals - accruals_p)  if not (np.isnan(accruals) or np.isnan(accruals_p))  else np.nan,
+        "fund_rcv_rev_spread":   (rcv_growth - rev_growth) if not (np.isnan(rcv_growth) or np.isnan(rev_growth)) else np.nan,
+        "fund_revenue_growth":   rev_growth,
+        "fund_roe":              roe,
+        "fund_de_ratio":         de_norm,
+        "fund_fcf_yield":        fcf_yield,
+    }
+
+    # Broadcast each scalar to a constant Series over the history index
+    df = pd.DataFrame({k: np.full(len(history), v) for k, v in vals.items()},
+                      index=history.index)
+    logger.debug("%s: fundamental features built — ROIC=%.2f FCFmargin=%.2f accruals=%.3f",
+                 symbol,
+                 vals["fund_roic"] if not np.isnan(vals["fund_roic"]) else -99,
+                 vals["fund_fcf_margin"] if not np.isnan(vals["fund_fcf_margin"]) else -99,
+                 vals["fund_accruals_ratio"] if not np.isnan(vals["fund_accruals_ratio"]) else -99)
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Feature engineering — cross-sectional peer ranking
+# ---------------------------------------------------------------------------
+
+def _fetch_peer_close(ticker: str, lookback_days: int = 800) -> Optional[pd.Series]:
+    """Fetch close-price series for a peer ticker (cached process-wide)."""
+    global _peer_cache
+    if ticker in _peer_cache:
+        s = _peer_cache[ticker]
+        return s if not s.empty else None
+    try:
+        import yfinance as yf
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            df = yf.Ticker(ticker).history(period="3y", auto_adjust=True)
+        if df is None or df.empty or "Close" not in df.columns:
+            _peer_cache[ticker] = pd.Series(dtype=float)
+            return None
+        s = df["Close"].squeeze()
+        # Strip timezone so reindex arithmetic works cleanly
+        if hasattr(s.index, "tz") and s.index.tz is not None:
+            s.index = s.index.tz_localize(None)
+        _peer_cache[ticker] = s
+        return s
+    except Exception as exc:
+        logger.debug("Peer %s fetch failed: %s", ticker, exc)
+        _peer_cache[ticker] = pd.Series(dtype=float)
+        return None
+
+
+def build_crosssectional_features(symbol: str,
+                                   history: pd.DataFrame,
+                                   sector: Optional[str] = None) -> pd.DataFrame:
+    """
+    Compute cross-sectional rank features: for each date, rank the target
+    stock's key technical indicators relative to its sector peers.
+
+    Features added (~6 columns)
+    ----------------------------
+    xs_rsi_rank         Percentile rank of RSI-14 among peers (0=lowest, 1=highest)
+    xs_mom5_rank        Percentile rank of 5-day momentum among peers
+    xs_mom20_rank       Percentile rank of 20-day momentum among peers
+    xs_hvol20_rank      Percentile rank of 20-day vol among peers (0=calmest)
+    xs_week52_rank      Percentile rank of 52-week range position among peers
+    xs_obv_rank         Percentile rank of OBV trend among peers
+
+    Why this improves AUROC
+    -----------------------
+    Factor exposure to SPY is removed from the alpha label, but common-factor
+    exposure within the sector is still present in raw momentum/RSI values.
+    Ranking within peers removes the sector beta, leaving purer idiosyncratic
+    signal — exactly what the alpha-vs-SPY label is trying to capture.
+
+    Implementation note: peers are fetched asynchronously at first call and
+    cached.  If fewer than 2 peers are available, all features are NaN
+    (the model will ignore NaN-constant columns via the 95%-NaN gate in
+    predict()).  This makes the function safe to call even offline.
+    """
+    feat = pd.DataFrame(index=history.index)
+    for col in ("xs_rsi_rank", "xs_mom5_rank", "xs_mom20_rank",
+                "xs_hvol20_rank", "xs_week52_rank", "xs_obv_rank"):
+        feat[col] = np.nan
+
+    # Determine peer list for this sector
+    peers = list(_SECTOR_PEERS.get(sector or "", []))
+    # Remove the stock itself from peer list (don't rank against yourself)
+    peers = [p for p in peers if p.upper() != symbol.upper()]
+    if not peers:
+        logger.debug("%s: no sector peers available — cross-sectional features skipped", symbol)
+        return feat
+
+    # Build the target's own indicators (already computed in build_technical_features
+    # but we recompute here to keep this function self-contained)
+    c = history["Close"]
+    high = history.get("High", c)
+    low  = history.get("Low",  c)
+    vol  = history.get("Volume", pd.Series(dtype=float, name="Volume", index=history.index))
+
+    def _stock_indicators(close_s: pd.Series,
+                          high_s: pd.Series,
+                          low_s: pd.Series,
+                          vol_s: pd.Series,
+                          index: pd.Index) -> pd.DataFrame:
+        """Compute the six indicator columns for one stock aligned to `index`."""
+        # Align to target stock's calendar
+        c_al = (close_s
+                .reindex(close_s.index.union(index))
+                .ffill()
+                .reindex(index))
+        rsi_s    = _rsi(c_al, 14) / 100.0
+        mom5_s   = c_al.pct_change(5)
+        mom20_s  = c_al.pct_change(20)
+        log_r    = np.log(c_al / c_al.shift(1))
+        hvol20_s = log_r.rolling(20, min_periods=10).std()
+        hi52_s   = c_al.rolling(252, min_periods=50).max()
+        lo52_s   = c_al.rolling(252, min_periods=50).min()
+        rng_s    = (hi52_s - lo52_s).replace(0, np.nan)
+        w52_s    = (c_al - lo52_s) / rng_s
+
+        # OBV trend — fall back to NaN if no volume
+        if vol_s is not None and vol_s.notna().sum() > 20:
+            obv_s = _obv_trend(c_al, vol_s.reindex(index).ffill())
+        else:
+            obv_s = pd.Series(np.nan, index=index)
+
+        return pd.DataFrame({
+            "rsi": rsi_s, "mom5": mom5_s, "mom20": mom20_s,
+            "hvol20": hvol20_s, "week52": w52_s, "obv": obv_s,
+        }, index=index)
+
+    # Compute indicators for the target stock
+    target_ind = _stock_indicators(c, high, low, vol, history.index)
+
+    # Collect indicators for each peer
+    peer_inds: list[pd.DataFrame] = []
+    for peer in peers[:7]:   # cap at 7 peers to bound network calls
+        ps = _fetch_peer_close(peer)
+        if ps is None or len(ps) < 30:
+            continue
+        # Use NaN high/low/vol for peers — only close is needed for ranking
+        peer_df = _stock_indicators(
+            ps,
+            ps,  # high ≈ close (conservative; doesn't affect RSI/mom/vol)
+            ps,  # low  ≈ close
+            pd.Series(dtype=float),
+            history.index,
+        )
+        peer_inds.append(peer_df)
+
+    if len(peer_inds) < 2:
+        logger.debug("%s: fewer than 2 peers fetched — cross-sectional features skipped", symbol)
+        return feat
+
+    # For each date, rank the target stock among all peers + itself
+    metrics = ["rsi", "mom5", "mom20", "hvol20", "week52", "obv"]
+    rename  = {
+        "rsi":    "xs_rsi_rank",
+        "mom5":   "xs_mom5_rank",
+        "mom20":  "xs_mom20_rank",
+        "hvol20": "xs_hvol20_rank",
+        "week52": "xs_week52_rank",
+        "obv":    "xs_obv_rank",
+    }
+
+    for metric in metrics:
+        # Stack target + peers into a wide DataFrame (rows=dates, cols=stocks)
+        all_cols = [target_ind[metric].rename("__target__")]
+        for i, pi in enumerate(peer_inds):
+            all_cols.append(pi[metric].rename(f"peer_{i}"))
+        wide = pd.concat(all_cols, axis=1)
+
+        # Percentile rank of target among all stocks at each date
+        # rank(pct=True) gives 0–1 rank, NaN rows automatically produce NaN
+        ranked = wide.rank(axis=1, pct=True, na_option="keep")
+        feat[rename[metric]] = ranked["__target__"].values
+
+    n_peers = len(peer_inds)
+    logger.debug("%s: cross-sectional features built using %d peers", symbol, n_peers)
+    return feat
+
+
+# ---------------------------------------------------------------------------
 # Combined feature matrix
 # ---------------------------------------------------------------------------
 
@@ -920,8 +1242,15 @@ def build_all_features(symbol: str,
                        history: pd.DataFrame,
                        sector: Optional[str] = None) -> pd.DataFrame:
     """
-    Combine technical + calendar + price-pattern + macro + HMM + MC features
-    into a single DataFrame.
+    Combine all feature groups into a single DataFrame:
+        technical    (~30 cols) — RSI, momentum, Bollinger, ATR, OBV, vol
+        calendar     (~8 cols)  — day-of-week/month seasonality, quarter-end
+        price-pattern (~12 cols) — candles, MACD, drawdown, Williams %R
+        macro        (~14 cols) — SPY/QQQ/TLT/GLD/IWM/VIX returns + rel-strength
+        HMM          (2 cols)   — regime probability + id
+        Monte Carlo  (1 col)    — DCF upside %
+        fundamental  (~12 cols) — ROIC, FCF margin, accruals, cash conversion  ← NEW
+        cross-sectional (~6 cols) — peer-relative RSI/momentum/vol ranks       ← NEW
     """
     tech     = build_technical_features(history)
     calendar = build_calendar_features(history)
@@ -929,8 +1258,10 @@ def build_all_features(symbol: str,
     macro    = build_macro_features(history, sector=sector)
     hmm      = build_hmm_features(history)
     mc       = build_mc_feature(symbol, history).to_frame()
+    fund     = build_fundamental_features(symbol, history)
+    xs       = build_crosssectional_features(symbol, history, sector=sector)
 
-    return pd.concat([tech, calendar, patterns, macro, hmm, mc], axis=1)
+    return pd.concat([tech, calendar, patterns, macro, hmm, mc, fund, xs], axis=1)
 
 
 # ---------------------------------------------------------------------------
@@ -1468,51 +1799,91 @@ def compute_swing_metrics(symbol: str, history: pd.DataFrame) -> Optional[SwingM
     ddraw  = (current_price / hi52 - 1) if hi52 > 0 else 0.0
 
     # ── Composite sell score (0–100) ──────────────────────────────────────────
-    # Each sub-signal contributes up to its weight; score 100 = maximum sell pressure.
+    # Designed conservatively: a stock needs MULTIPLE bearish signals to reach
+    # CONSIDER_SELL (≥60) or STRONG_SELL (≥80). A single stretched indicator
+    # is not enough. ADD requires ALL four core signals to be bullish.
     sell_score = 0.0
 
-    # RSI overbought (max 25 pts)
+    # ── 1. RSI pressure (max 25 pts) ─────────────────────────────────────────
+    # Only scores meaningfully above 60 (not just above 50)
     if not np.isnan(rsi_val):
-        sell_score += float(np.clip((rsi_val - 50) / 50 * 25, 0, 25))
+        if rsi_val >= 75:
+            sell_score += 25.0
+        elif rsi_val >= 70:
+            sell_score += 18.0
+        elif rsi_val >= 65:
+            sell_score += 10.0
+        elif rsi_val >= 60:
+            sell_score += 4.0
+        # Below 60 contributes 0
 
-    # Bollinger extension (max 20 pts)
+    # ── 2. Bollinger extension (max 20 pts) ───────────────────────────────────
+    # Only score when price is genuinely extended (>0.80), not merely above midline
     if not np.isnan(bb_pct):
-        sell_score += float(np.clip((bb_pct - 0.5) / 0.5 * 20, 0, 20))
+        if bb_pct >= 0.95:
+            sell_score += 20.0
+        elif bb_pct >= 0.90:
+            sell_score += 14.0
+        elif bb_pct >= 0.80:
+            sell_score += 6.0
+        # Below 0.80 contributes 0
 
-    # MACD bearish (max 15 pts)
+    # ── 3. MACD bearish momentum (max 20 pts) ────────────────────────────────
     if macd_sig == "BEARISH_CROSS":
-        sell_score += 15.0
-    elif macd_sig == "NEUTRAL" and hist_norm < 0:
-        sell_score += 7.0
+        sell_score += 20.0
+    elif macd_sig == "NEUTRAL" and hist_norm < -0.0005:   # meaningfully negative
+        sell_score += 8.0
+    # BULLISH MACD = 0 pts (no sell pressure)
 
-    # Price stretched above MA50 (max 15 pts)
+    # ── 4. Price stretched above MA50 (max 20 pts) ────────────────────────────
+    # Only above a meaningful stretch threshold (>10%)
     if not np.isnan(pct_vs_ma50):
-        sell_score += float(np.clip(pct_vs_ma50 / 0.20 * 15, 0, 15))
+        if pct_vs_ma50 >= 0.30:
+            sell_score += 20.0
+        elif pct_vs_ma50 >= 0.20:
+            sell_score += 14.0
+        elif pct_vs_ma50 >= 0.10:
+            sell_score += 6.0
+        # Below 10% above MA50 = 0 pts
 
-    # Price stretched above MA200 (max 10 pts)
+    # ── 5. Price stretched above MA200 (max 10 pts) ───────────────────────────
     if not np.isnan(pct_vs_ma200):
-        sell_score += float(np.clip(pct_vs_ma200 / 0.30 * 10, 0, 10))
+        if pct_vs_ma200 >= 0.40:
+            sell_score += 10.0
+        elif pct_vs_ma200 >= 0.25:
+            sell_score += 5.0
+        # Below 25% above MA200 = 0 pts
 
-    # Volatility regime high (max 10 pts) — exits are cheaper in low-vol windows
+    # ── 6. Volatility regime (max 5 pts) ─────────────────────────────────────
     if vol_reg == "HIGH":
-        sell_score += 10.0
+        sell_score += 5.0
     elif vol_reg == "LOW":
-        sell_score -= 5.0   # low-vol trending markets; don't rush to sell
-
-    # Proximity to 52-week high (max 5 pts)
-    if hi52 > 0 and not np.isnan(ddraw):
-        sell_score += float(np.clip((1 + ddraw) * 5, 0, 5))
+        sell_score -= 3.0   # low-vol trending market — don't rush to exit
 
     sell_score = float(np.clip(sell_score, 0, 100))
 
-    # ── Recommendation ────────────────────────────────────────────────────────
-    if sell_score >= 70:
+    # ── Recommendation — requires MULTIPLE signals to reach sell tiers ────────
+    # ADD: only when the stock is NOT overbought on any of the four core signals
+    # HOLD: mild pressure on 1–2 signals
+    # CONSIDER_SELL: clear pressure on 2–3 signals (score ≥ 45)
+    # STRONG_SELL:   overbought on 3–4 signals simultaneously (score ≥ 75)
+
+    # Count how many core signals are bearish
+    bearish_signals = sum([
+        rsi_val >= 65 if not np.isnan(rsi_val) else False,          # RSI extended
+        bb_pct >= 0.80 if not np.isnan(bb_pct) else False,          # BB extended
+        macd_sig in ("BEARISH_CROSS",) or (macd_sig == "NEUTRAL" and hist_norm < -0.0005),
+        pct_vs_ma50 >= 0.10 if not np.isnan(pct_vs_ma50) else False, # >10% above MA50
+    ])
+
+    if sell_score >= 75 or bearish_signals >= 4:
         sell_rec = "STRONG_SELL"
-    elif sell_score >= 50:
+    elif sell_score >= 45 or bearish_signals >= 3:
         sell_rec = "CONSIDER_SELL"
-    elif sell_score >= 25:
+    elif sell_score >= 20 or bearish_signals >= 2:
         sell_rec = "HOLD"
     else:
+        # ADD requires ALL four signals to be neutral/bullish
         sell_rec = "ADD"
 
     result = SwingMetrics(

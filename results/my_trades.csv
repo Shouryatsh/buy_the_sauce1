@@ -4,3 +4,4 @@ date,symbol,action,quantity,entry_price,exit_price,amount_invested,realized_pnl,
 2026-03-09,UNH,BUY,23.0,316.0,,7268.0,,
 2026-03-09,SCHD,BUY,100.0,31.51,,3151.0,,
 2026-03-09,HIMS,BUY,310.0,15.0,,4650.0,,
+2026-03-12,AAPL,BUY,10.0,180.0,,1800.0,,test

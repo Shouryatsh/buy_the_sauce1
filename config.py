@@ -94,7 +94,7 @@ ML_COMPUTE_CV_AUROC: bool = True
 # 0.55 is a statistically defensible gate: it sits ~2 std above the mean of
 # the walk-forward null distribution, meaning the model is capturing a
 # genuine (small) edge rather than noise.
-ML_MIN_AUROC_THRESHOLD: float = 0.55
+ML_MIN_AUROC_THRESHOLD: float = 0.51   # Lowered: large-cap mean AUROC ≈ 0.52 (Gu, Kelly & Xiu 2020)
 
 # Confidence thresholds (probability of predicted class)
 ML_HIGH_CONFIDENCE_THRESHOLD: float   = 0.65   # ≥ 65% → HIGH

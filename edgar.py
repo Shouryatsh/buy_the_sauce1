@@ -186,6 +186,11 @@ def _fetch_price_from_ibkr(symbol: str, period_years: int = 2) -> Optional[pd.Da
         df = util.df(bars)[["date", "open", "high", "low", "close", "volume"]].copy()
         df.columns = ["Date", "Open", "High", "Low", "Close", "Volume"]
         df = df.set_index("Date").sort_index()
+        # ib_insync util.df returns datetime.date objects — coerce to DatetimeIndex
+        # so downstream feature engineering (ml_predictor.build_calendar_features)
+        # can call .dayofweek / .month / etc. without AttributeError.
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index)
         logger.info("%s: fetched %d price bars from IBKR", symbol, len(df))
         return df
     except Exception as exc:
@@ -279,11 +284,26 @@ def get_fundamentals(symbol: str) -> dict:
     profitMargins       – net income / revenue
     debtToEquity        – (total liabilities / equity) × 100  [screener divides by 100]
     freeCashflow        – operating CF − capex (most recent fiscal year)
-    marketCap           – shares × latest Stooq close
+    marketCap           – shares × latest price
     returnOnEquity      – net income / stockholders equity
     capitalExpenditures – capex as a negative number (convention)
     _fcf_history        – [FCF_yr0, FCF_yr1, ...] newest→oldest (for trend check)
     _sic                – 4-digit SIC string (for sector-aware D/E in screener)
+
+    New quality metrics (YoY comparisons)
+    --------------------------------------
+    roic                – net income / (equity + long-term debt)  [most recent year]
+    roic_prior          – same, prior year
+    fcf_margin          – FCF / revenue  [most recent year]
+    fcf_margin_prior    – same, prior year
+    cash_conversion     – FCF / net income  (>1 = converting earnings to cash)
+    cash_conversion_prior
+    accruals_ratio      – (net_income − FCF) / avg_assets  (lower = higher quality)
+    accruals_ratio_prior
+    receivables_growth  – YoY growth in accounts receivable
+    revenue_growth      – YoY growth in revenue  (compare to receivables_growth)
+    revenue_prior       – prior-year revenue  (for display)
+    revenue_current     – current-year revenue (for display)
     """
     result: dict = {}
     cik = _get_cik(symbol)
@@ -321,8 +341,6 @@ def get_fundamentals(symbol: str) -> dict:
         pairs = min(len(op_cf_vals), len(capex_vals))
         fcf_history = [op_cf_vals[i] - capex_vals[i] for i in range(pairs)]
     elif op_cf_vals:
-        # Some asset-light companies (e.g. Visa) have near-zero capex not tagged separately
-        # Use operating CF as a conservative FCF proxy
         fcf_history = op_cf_vals[:]
         logger.debug("%s: no capex tag found — using operating CF as FCF proxy", symbol)
 
@@ -364,13 +382,72 @@ def get_fundamentals(symbol: str) -> dict:
     if net_income_vals and equity_vals and equity_vals[0] != 0:
         result["returnOnEquity"] = net_income_vals[0] / equity_vals[0]
 
+    # --- Long-term debt (for ROIC) ---
+    ltd_vals = (
+        _get_annual_values(facts, "LongTermDebt")
+        or _get_annual_values(facts, "LongTermDebtNoncurrent")
+        or _get_annual_values(facts, "LongTermNotesPayable")
+    )
+
+    # --- ROIC: net income / (equity + long-term debt) ---
+    # Current year
+    if net_income_vals and equity_vals and equity_vals[0] != 0:
+        ltd_0 = ltd_vals[0] if ltd_vals else 0.0
+        invested_capital_0 = equity_vals[0] + ltd_0
+        if invested_capital_0 > 0:
+            result["roic"] = net_income_vals[0] / invested_capital_0
+    # Prior year
+    if (len(net_income_vals) > 1 and len(equity_vals) > 1):
+        ltd_1 = ltd_vals[1] if ltd_vals and len(ltd_vals) > 1 else 0.0
+        invested_capital_1 = equity_vals[1] + ltd_1
+        if invested_capital_1 > 0:
+            result["roic_prior"] = net_income_vals[1] / invested_capital_1
+
+    # --- FCF margin: FCF / revenue ---
+    if fcf_history and revenue_vals and revenue_vals[0]:
+        result["fcf_margin"] = fcf_history[0] / revenue_vals[0]
+    if len(fcf_history) > 1 and revenue_vals and len(revenue_vals) > 1 and revenue_vals[1]:
+        result["fcf_margin_prior"] = fcf_history[1] / revenue_vals[1]
+
+    # --- Cash conversion: FCF / net income (>1 = cash compounder) ---
+    if fcf_history and net_income_vals and net_income_vals[0] and net_income_vals[0] != 0:
+        result["cash_conversion"] = fcf_history[0] / net_income_vals[0]
+    if (len(fcf_history) > 1 and len(net_income_vals) > 1
+            and net_income_vals[1] and net_income_vals[1] != 0):
+        result["cash_conversion_prior"] = fcf_history[1] / net_income_vals[1]
+
+    # --- Accruals ratio: (net_income − FCF) / avg_assets ---
+    # Lower (or negative) accruals ratio = higher earnings quality
+    total_assets_vals = _get_annual_values(facts, "Assets")
+    if (net_income_vals and fcf_history and total_assets_vals
+            and len(total_assets_vals) >= 2 and total_assets_vals[0] > 0):
+        avg_assets = (total_assets_vals[0] + total_assets_vals[1]) / 2
+        result["accruals_ratio"] = (net_income_vals[0] - fcf_history[0]) / avg_assets
+    if (len(net_income_vals) > 1 and len(fcf_history) > 1
+            and len(total_assets_vals) >= 3 and total_assets_vals[1] > 0):
+        avg_assets_prior = (total_assets_vals[1] + total_assets_vals[2]) / 2
+        result["accruals_ratio_prior"] = (net_income_vals[1] - fcf_history[1]) / avg_assets_prior
+
+    # --- Receivables growth vs revenue growth ---
+    receivables_vals = (
+        _get_annual_values(facts, "AccountsReceivableNetCurrent")
+        or _get_annual_values(facts, "ReceivablesNetCurrent")
+        or _get_annual_values(facts, "AccountsReceivableNet")
+    )
+    if receivables_vals and len(receivables_vals) >= 2 and receivables_vals[1] > 0:
+        result["receivables_growth"] = (receivables_vals[0] / receivables_vals[1]) - 1
+    if revenue_vals and len(revenue_vals) >= 2 and revenue_vals[1] > 0:
+        result["revenue_growth"] = (revenue_vals[0] / revenue_vals[1]) - 1
+        result["revenue_current"] = revenue_vals[0]
+        result["revenue_prior"]   = revenue_vals[1]
+
     # --- Shares outstanding ---
     shares_vals = (
         _get_annual_values(facts, "CommonStockSharesOutstanding", unit="shares")
         or _get_annual_values(facts, "EntityCommonStockSharesOutstanding", unit="shares")
     )
 
-    # --- Latest price from Stooq / IBKR ---
+    # --- Latest price from IBKR / yfinance ---
     price_hist, _price_src = get_price_history(symbol, period_years=2)
     latest_price: Optional[float] = None
     if price_hist is not None and not price_hist.empty:
@@ -389,11 +466,16 @@ def get_fundamentals(symbol: str) -> dict:
     fcf_display = f"${result['freeCashflow']:,.0f}" if isinstance(result.get("freeCashflow"), float) else "N/A"
     de_display  = f"{result['debtToEquity']/100:.2f}x" if "debtToEquity" in result else "N/A"
     logger.info(
-        "%s: EDGAR fundamentals fetched — FCF=%s, margin=%s, D/E=%s, ROE=%s, SIC=%s",
+        "%s: EDGAR fundamentals fetched — FCF=%s, margin=%s, D/E=%s, ROE=%s, "
+        "ROIC=%s, FCFmargin=%s, CashConv=%s, AccrualsRatio=%s, SIC=%s",
         symbol, fcf_display,
         f"{result['profitMargins']:.1%}" if "profitMargins" in result else "N/A",
         de_display,
         f"{result['returnOnEquity']:.1%}" if "returnOnEquity" in result else "N/A",
+        f"{result['roic']:.1%}" if "roic" in result else "N/A",
+        f"{result['fcf_margin']:.1%}" if "fcf_margin" in result else "N/A",
+        f"{result['cash_conversion']:.2f}x" if "cash_conversion" in result else "N/A",
+        f"{result['accruals_ratio']:.3f}" if "accruals_ratio" in result else "N/A",
         sic or "N/A",
     )
     return result

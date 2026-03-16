@@ -31,6 +31,28 @@ import warnings
 warnings.filterwarnings("ignore")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# ── ML dependency pre-flight check ────────────────────────────────────────────
+# Emit one clear error at startup if ML libraries are missing, rather than a
+# cryptic WARNING buried in screener output mid-refresh.
+_ML_MISSING: list[str] = []
+for _lib in ("lightgbm", "xgboost", "scipy"):
+    try:
+        __import__(_lib)
+    except ImportError:
+        _ML_MISSING.append(_lib)
+if _ML_MISSING:
+    _venv = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "bin", "python3")
+    print(
+        f"\n  ⚠️  ML libraries missing from this Python interpreter: {', '.join(_ML_MISSING)}\n"
+        f"     Active interpreter: {sys.executable}\n"
+        f"     Fix: run the dashboard with the project virtualenv:\n"
+        f"       {_venv} dashboard.py\n"
+        f"     Or install missing packages:\n"
+        f"       {sys.executable} -m pip install {' '.join(_ML_MISSING)}\n"
+        f"     ML predictions will show 'n/a' until this is fixed.\n",
+        file=sys.stderr,
+    )
+
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
@@ -175,21 +197,20 @@ def fetch_screen_data() -> list[dict]:
     """Run the full screener pipeline and return a list of record dicts."""
     import traceback
     import edgar
-    from screener import screen_fundamental
+    from screener import screen_fundamental, FundamentalProfile
     from dip_detector import score_dip
 
-    _FallbackProfile = lambda reasons: type("P", (), {
-        "passes": False, "fail_reasons": reasons,
-        "free_cash_flow": None, "fcf_yield": None,
-        "profit_margin": None, "debt_to_equity": None,
-        "return_on_equity": None,
-    })()
+    def _fallback_profile(symbol: str, reasons: list) -> "FundamentalProfile":
+        p = FundamentalProfile(symbol=symbol)
+        p.passes = False
+        p.fail_reasons = reasons
+        return p
 
     records = []
     for symbol in WATCHLIST:
         price_source = "error"
         info = {}
-        profile = _FallbackProfile(["not fetched"])
+        profile = _fallback_profile(symbol, ["not fetched"])
         signal = None
         try:
             # --- price history first (IBKR → yfinance fallback) ---
@@ -200,7 +221,7 @@ def fetch_screen_data() -> list[dict]:
                 profile = screen_fundamental(symbol, info=info)
             except Exception as fund_exc:
                 print(f"[dashboard] {symbol} fundamentals error: {fund_exc}")
-                profile = _FallbackProfile([f"fund error: {fund_exc}"])
+                profile = _fallback_profile(symbol, [f"fund error: {fund_exc}"])
             # --- dip signal ---
             signal = score_dip(symbol, hist) if hist is not None and not hist.empty else None
         except Exception as exc:
@@ -236,13 +257,61 @@ def _records_to_df(records: list[dict]) -> pd.DataFrame:
         ml_prob   = round(s.ml_probability * 100, 0) if s and s.ml_probability else None
         ml_conf   = s.ml_confidence         if s else None
         ml_ok     = s.ml_buy_confirmed      if s else False
+        # Show the best AUROC across all three horizons (1W/1M/1Y) so the user
+        # understands why a horizon might be n/a (below the 0.51 gate).
+        mh_for_auroc = getattr(s, "multi_horizon", None) if s else None
+        _horizon_aurocs = []
+        if mh_for_auroc:
+            for _pred in (mh_for_auroc.week1, mh_for_auroc.month1, mh_for_auroc.year1):
+                if _pred and getattr(_pred, "auroc_cv", None) is not None:
+                    _horizon_aurocs.append(_pred.auroc_cv)
+        # Also check the single-horizon auroc on the signal itself
+        _sig_auroc = getattr(s, "ml_auroc_cv", None) if s else None
+        if _sig_auroc is not None:
+            _horizon_aurocs.append(_sig_auroc)
+        ml_auroc  = round(max(_horizon_aurocs), 3) if _horizon_aurocs else None
 
         fund_pass = p.passes
-        margin    = round(p.profit_margin * 100, 1)   if p.profit_margin   is not None else None
         de        = round(p.debt_to_equity, 2)         if p.debt_to_equity  is not None else None
-        roe       = round(p.return_on_equity * 100, 1) if p.return_on_equity is not None else None
         fcf_b     = round(p.free_cash_flow / 1e9, 2)  if p.free_cash_flow  is not None else None
         pe        = round(r["info"].get("trailingPE") or r["info"].get("forwardPE") or 0, 1) or None
+
+        # ── helpers ────────────────────────────────────────────────────────────
+        def _pct(v, decimals=1):
+            return round(v * 100, decimals) if v is not None else None
+
+        def _yoy(curr, prior, label="%"):
+            """Format YoY comparison as 'curr (Δprior)'."""
+            if curr is None:
+                return "n/a"
+            curr_s = f"{curr*100:.1f}{label}"
+            if prior is not None:
+                delta = curr - prior
+                sign  = "+" if delta >= 0 else ""
+                return f"{curr_s} ({sign}{delta*100:.1f})"
+            return curr_s
+
+        def _yoy_x(curr, prior):
+            """Format cash-conversion-style YoY as 'Xx (Δ)'."""
+            if curr is None:
+                return "n/a"
+            curr_s = f"{curr:.2f}x"
+            if prior is not None:
+                delta  = curr - prior
+                sign   = "+" if delta >= 0 else ""
+                return f"{curr_s} ({sign}{delta:.2f})"
+            return curr_s
+
+        def _yoy_raw(curr, prior, scale=1e9, unit="B"):
+            """Format raw-value YoY (e.g. revenue in $B)."""
+            if curr is None:
+                return "n/a"
+            curr_s = f"${curr/scale:.1f}{unit}"
+            if prior is not None:
+                pct    = (curr / prior - 1) * 100 if prior != 0 else float("nan")
+                sign   = "+" if pct >= 0 else ""
+                return f"{curr_s} ({sign}{pct:.0f}%)"
+            return curr_s
 
         # ── Multi-horizon cells ───────────────────────────────────────────────
         def _hcell(pred):
@@ -275,6 +344,25 @@ def _records_to_df(records: list[dict]) -> pd.DataFrame:
         days_hi    = sm.days_since_high                   if sm else None
         vol_reg    = sm.vol_regime                        if sm else None
 
+        # ── New fundamentals (TABLE 2) ─────────────────────────────────────────
+        # ROIC: current (prior year delta in parens)
+        roic_col      = _yoy(getattr(p, "roic", None),            getattr(p, "roic_prior", None))
+        fcf_margin_col= _yoy(getattr(p, "fcf_margin", None),      getattr(p, "fcf_margin_prior", None))
+        cash_conv_col = _yoy_x(getattr(p, "cash_conversion", None), getattr(p, "cash_conversion_prior", None))
+        # FCF raw: current vs prior (from FCF history)
+        fcf_vals      = r["info"].get("_fcf_history", [])
+        fcf_prior_raw = fcf_vals[1] if isinstance(fcf_vals, list) and len(fcf_vals) > 1 else None
+        fcf_col       = _yoy_raw(p.free_cash_flow, fcf_prior_raw)
+        de_col        = f"{de:.2f}x" if de is not None else "n/a"
+        accruals_col  = _yoy(getattr(p, "accruals_ratio", None),  getattr(p, "accruals_ratio_prior", None), label="")
+        # Receivables growth vs revenue growth
+        rec_growth = getattr(p, "receivables_growth", None)
+        rev_growth = getattr(p, "revenue_growth", None)
+        rec_gr  = f"{rec_growth*100:+.1f}%" if rec_growth is not None else "n/a"
+        rev_gr  = f"{rev_growth*100:+.1f}%"  if rev_growth is not None else "n/a"
+        rec_vs_rev = f"{rec_gr} vs {rev_gr}"          # e.g. "+12.0% vs +8.0%"
+        revenue_col   = _yoy_raw(getattr(p, "revenue_current", None), getattr(p, "revenue_prior", None))
+
         # Signal label
         if is_dip and fund_pass and (not config.ML_GATE_BUY_SIGNAL or not config.ML_ENABLED or ml_ok):
             signal_label = "🟢 BUY"
@@ -299,13 +387,18 @@ def _records_to_df(records: list[dict]) -> pd.DataFrame:
             "ML 1W":      ml_1w,
             "ML 1M":      ml_1m,
             "ML 1Y":      ml_1y,
-            # ── TABLE 1 extras ────────────────────────────────────────────────
-            "Margin%":    margin,
-            "D/E":        de,
-            "ROE%":       roe,
-            "FCF $B":     fcf_b,
+            "ML AUROC":   ml_auroc,
             "P/E":        pe,
             "Src":        r["price_source"],
+            # ── TABLE 2: Fundamentals (new) ───────────────────────────────────
+            "ROIC":           roic_col,
+            "FCF Margin":     fcf_margin_col,
+            "FCF":            fcf_col,
+            "Cash Conv":      cash_conv_col,
+            "D/E":            de_col,
+            "Accruals":       accruals_col,
+            "AR vs Rev Gr":   rec_vs_rev,
+            "Revenue":        revenue_col,
             # ── TABLE 3: Swing sell metrics ───────────────────────────────────
             "Sell Rec":   sell_rec,
             "Sell Score": sell_score,
@@ -538,7 +631,7 @@ def _screener_layout():
             html.H6("📊 TABLE 2 — Fundamental Quality Screen",
                     style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
             html.Div(
-                "FCF, yield, profit margin, D/E, ROE, P/E — PASS = cleared all filters",
+                "ROIC, FCF margin, FCF (YoY), Cash Conversion, D/E, Accruals, AR vs Revenue Growth — PASS = cleared all filters",
                 style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
             ),
             html.Div(id="fund-table-container",
@@ -553,7 +646,7 @@ def _screener_layout():
             html.Div(
                 "Sorted by sell pressure (highest first).  "
                 "Stop=price−2×ATR  Target=price+3×ATR  "
-                "STRONG_SELL≥70 | CONSIDER_SELL≥50 | HOLD≥25 | ADD<25",
+                "STRONG_SELL≥75 | CONSIDER_SELL≥45 | HOLD≥20 | ADD=all 4 core signals neutral/bullish",
                 style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
             ),
             html.Div(id="swing-table-container",
@@ -851,7 +944,9 @@ def _log_layout():
         return _card(html.Div("No screen log found. Run the screener first.",
                                style={"color": MUTED, "fontFamily": "monospace"}))
 
-    df = pd.read_csv(SCREEN_CSV)
+    # on_bad_lines='skip' tolerates rows written by older versions of run_screen.py
+    # that had a different column count than the current schema.
+    df = pd.read_csv(SCREEN_CSV, on_bad_lines="skip")
     df["dip_score"]   = pd.to_numeric(df["dip_score"],   errors="coerce")
     df["rsi"]         = pd.to_numeric(df["rsi"],         errors="coerce")
     df["price"]       = pd.to_numeric(df["price"],       errors="coerce")
@@ -878,7 +973,10 @@ def _log_layout():
         y=rsi_pivot.index.tolist(),
         colorscale=[[0, RED], [0.35, YELLOW], [0.65, ACCENT], [1, GREEN]],
         zmin=0, zmax=100,
-        colorbar=dict(title="RSI", tickfont=dict(color=TEXT), titlefont=dict(color=TEXT)),
+        colorbar=dict(
+            title=dict(text="RSI", font=dict(color=TEXT)),
+            tickfont=dict(color=TEXT),
+        ),
         hovertemplate="Date: %{x}<br>Symbol: %{y}<br>RSI: %{z:.1f}<extra></extra>",
     ))
     rsi_fig.add_hline(y=-0.5, annotation_text="Oversold < 35",
@@ -1198,7 +1296,7 @@ def refresh_screener(n_clicks):
 
     # ── TABLE 1: Dip Detector — entry signals ────────────────────────────────
     t1_cols = ["Symbol","Signal","Score","Price","RSI","vs MA50%","vs MA200%",
-               "52wk%","Fund","ML 1W","ML 1M","ML 1Y","Src"]
+               "52wk%","Fund","ML 1W","ML 1M","ML 1Y","ML AUROC","Src"]
     t1_df = df[t1_cols].sort_values(
         "Score", ascending=False,
         key=lambda s: s.str.extract(r"(\d)")[0].astype(float),
@@ -1206,9 +1304,26 @@ def refresh_screener(n_clicks):
     t1 = _make_table(t1_df, "screener-table")
 
     # ── TABLE 2: Fundamentals ─────────────────────────────────────────────────
-    t2_cols = ["Symbol","Fund","Margin%","D/E","ROE%","FCF $B","P/E","Signal"]
+    t2_cols = ["Symbol","Fund","ROIC","FCF Margin","FCF","Cash Conv","D/E","Accruals","AR vs Rev Gr","Revenue","P/E","Signal"]
     t2_df = df[t2_cols].copy()
-    t2 = _make_table(t2_df, "fund-table")
+
+    # Colour-code ROIC and accruals cells
+    fund_colours = [
+        {"if": {"filter_query": '{Fund} = "✅"', "column_id": "Fund"}, "color": GREEN, "fontWeight": "bold"},
+        {"if": {"filter_query": '{Fund} = "❌"', "column_id": "Fund"}, "color": RED,   "fontWeight": "bold"},
+    ]
+    t2 = dash_table.DataTable(
+        id="fund-table",
+        columns=[{"name": c, "id": c} for c in t2_df.columns],
+        data=t2_df.to_dict("records"),
+        style_cell=_CELL_STYLE,
+        style_header=_HDR_STYLE,
+        style_data_conditional=fund_colours,
+        style_table={"overflowX": "auto", "borderRadius": "6px"},
+        sort_action="native",
+        filter_action="native",
+        page_size=40,
+    )
 
     # ── TABLE 3: Swing Sell Metrics — sorted by sell pressure ─────────────────
     t3_cols = ["Symbol","Sell Rec","Sell Score","RSI-14","RSI Sig",
@@ -1230,9 +1345,9 @@ def refresh_screener(n_clicks):
         {"if": {"filter_query": '{BB Sig} = "COMPRESSED"',      "column_id": "BB Sig"},   "color": GREEN},
         {"if": {"filter_query": '{MACD Sig} = "BEARISH_CROSS"', "column_id": "MACD Sig"}, "color": RED},
         {"if": {"filter_query": '{MACD Sig} = "BULLISH"',       "column_id": "MACD Sig"}, "color": GREEN},
-        {"if": {"filter_query": "{Sell Score} >= 70",           "column_id": "Sell Score"}, "color": RED,   "fontWeight": "bold"},
-        {"if": {"filter_query": "{Sell Score} >= 50 && {Sell Score} < 70", "column_id": "Sell Score"}, "color": "#f0883e"},
-        {"if": {"filter_query": "{Sell Score} < 25",            "column_id": "Sell Score"}, "color": GREEN},
+        {"if": {"filter_query": "{Sell Score} >= 75",           "column_id": "Sell Score"}, "color": RED,   "fontWeight": "bold"},
+        {"if": {"filter_query": "{Sell Score} >= 45 && {Sell Score} < 75", "column_id": "Sell Score"}, "color": "#f0883e"},
+        {"if": {"filter_query": "{Sell Score} < 20",            "column_id": "Sell Score"}, "color": GREEN},
         {"if": {"filter_query": '{Vol} = "HIGH"',               "column_id": "Vol"},       "color": RED},
         {"if": {"filter_query": '{Vol} = "LOW"',                "column_id": "Vol"},       "color": GREEN},
     ]

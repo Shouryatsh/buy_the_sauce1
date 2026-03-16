@@ -51,6 +51,19 @@ class FundamentalProfile:
     fcf_increasing: Optional[bool] = None    # True if FCF trended up over lookback
     return_on_equity: Optional[float] = None
     capex_to_fcf: Optional[float] = None
+    # ── New quality metrics ──────────────────────────────────────────────────
+    roic: Optional[float] = None             # Return on Invested Capital (current yr)
+    roic_prior: Optional[float] = None       # ROIC prior year
+    fcf_margin: Optional[float] = None       # FCF / Revenue (current yr)
+    fcf_margin_prior: Optional[float] = None # FCF / Revenue (prior yr)
+    cash_conversion: Optional[float] = None  # FCF / Net Income (current yr)
+    cash_conversion_prior: Optional[float] = None
+    accruals_ratio: Optional[float] = None   # (NI − FCF) / avg assets — lower = better
+    accruals_ratio_prior: Optional[float] = None
+    receivables_growth: Optional[float] = None  # YoY AR growth
+    revenue_growth: Optional[float] = None      # YoY revenue growth
+    revenue_current: Optional[float] = None     # raw revenue this year
+    revenue_prior: Optional[float] = None       # raw revenue last year
     passes: bool = True
     fail_reasons: list = field(default_factory=list)
 
@@ -112,6 +125,14 @@ def screen_fundamental(
     """
     if info is None:
         info = edgar.get_fundamentals(symbol)
+
+    # Pre-populate the ML predictor's fundamental cache so predict() won't
+    # make a second EDGAR network call for the same symbol.
+    try:
+        import ml_predictor
+        ml_predictor.prime_fundamental_cache(symbol, info)
+    except Exception:
+        pass  # ml_predictor may not be imported yet — safe to ignore
 
     profile = FundamentalProfile(symbol=symbol)
 
@@ -221,5 +242,19 @@ def screen_fundamental(
         logger.info(
             "%s: FAIL fundamental screen — %s", symbol, "; ".join(profile.fail_reasons)
         )
+
+    # ── Populate new quality metrics (informational — do not gate pass/fail) ──
+    profile.roic               = _safe_float(info.get("roic"))
+    profile.roic_prior         = _safe_float(info.get("roic_prior"))
+    profile.fcf_margin         = _safe_float(info.get("fcf_margin"))
+    profile.fcf_margin_prior   = _safe_float(info.get("fcf_margin_prior"))
+    profile.cash_conversion    = _safe_float(info.get("cash_conversion"))
+    profile.cash_conversion_prior = _safe_float(info.get("cash_conversion_prior"))
+    profile.accruals_ratio     = _safe_float(info.get("accruals_ratio"))
+    profile.accruals_ratio_prior = _safe_float(info.get("accruals_ratio_prior"))
+    profile.receivables_growth = _safe_float(info.get("receivables_growth"))
+    profile.revenue_growth     = _safe_float(info.get("revenue_growth"))
+    profile.revenue_current    = _safe_float(info.get("revenue_current"))
+    profile.revenue_prior      = _safe_float(info.get("revenue_prior"))
 
     return profile
