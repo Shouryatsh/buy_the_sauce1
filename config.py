@@ -15,11 +15,123 @@ IBKR_CLIENT_ID: int = 1
 # ---------------------------------------------------------------------------
 # Risk management
 # ---------------------------------------------------------------------------
-STOP_LOSS_PCT: float = 0.07       # 7% below entry price
-TAKE_PROFIT_PCT: float = 0.15     # 15% above entry price
+STOP_LOSS_PCT: float = 0.07       # 7% below entry price (fallback when ATR unavailable)
+TAKE_PROFIT_PCT: float = 0.15     # 15% above entry price (fallback when ATR unavailable)
 RISK_PER_TRADE_PCT: float = 0.01  # Risk 1% of total account equity per trade
 MAX_POSITIONS: int = 10           # Max concurrent open positions
 MAX_POSITION_PCT: float = 0.05    # Max 5% of portfolio in a single stock
+
+# ---------------------------------------------------------------------------
+# ATR-based dynamic stop / target  (overrides fixed STOP_LOSS_PCT when enabled)
+# ---------------------------------------------------------------------------
+USE_ATR_STOPS: bool = True          # True = ATR-based stops; False = fixed %
+ATR_STOP_MULTIPLIER: float = 2.0    # Stop  = entry − ATR_STOP_MULTIPLIER × ATR(14)
+ATR_TARGET_MULTIPLIER: float = 3.0  # Target = entry + ATR_TARGET_MULTIPLIER × ATR(14)
+ATR_MAX_STOP_PCT: float = 0.12      # Hard cap: stop never > 12% below entry
+ATR_MIN_STOP_PCT: float = 0.03      # Hard floor: stop never < 3% below entry
+#   These caps prevent ATR blowing out in low-liquidity or very high-vol names.
+
+# ---------------------------------------------------------------------------
+# Trailing stop  (adaptive three-stage)
+# ---------------------------------------------------------------------------
+# Stage 1 — "breakeven lock":  once price reaches +1×ATR above avg entry,
+#   trail moves to entry (breakeven).
+# Stage 2 — "lock profit":  once price reaches +2×ATR above avg entry,
+#   trail moves to entry + 1×ATR.
+# Stage 3 — "tight trail":  once price reaches +3×ATR above avg entry,
+#   trail tightens to highest_price − 1×ATR.
+#
+# At all stages the trailing stop can only move UP, never down.
+TRAILING_STOP_ENABLED: bool = True
+TRAILING_STAGE1_TRIGGER_ATR: float = 1.0   # +1×ATR → trail = entry (breakeven)
+TRAILING_STAGE2_TRIGGER_ATR: float = 2.0   # +2×ATR → trail = entry + 1×ATR
+TRAILING_STAGE3_TRIGGER_ATR: float = 3.0   # +3×ATR → trail = high  − 1×ATR
+TRAILING_STAGE3_TRAIL_ATR: float   = 1.0   # tight trail distance (×ATR)
+
+# ---------------------------------------------------------------------------
+# Partial exit  (staged profit-taking)
+# ---------------------------------------------------------------------------
+# Take partial profits at +2×ATR and +3×ATR to lock in gains while
+# letting the remainder run.  Fractions must sum to ≤ 1.0 with the
+# final exit at the trailing stop.
+PARTIAL_EXIT_ENABLED: bool = True
+PARTIAL_EXIT_1_TRIGGER_ATR: float = 2.0   # sell first slice at +2×ATR
+PARTIAL_EXIT_1_FRACTION: float    = 0.33  # sell 1/3 of position
+PARTIAL_EXIT_2_TRIGGER_ATR: float = 3.0   # sell second slice at +3×ATR
+PARTIAL_EXIT_2_FRACTION: float    = 0.33  # sell another 1/3
+#   Remaining 1/3 rides the trailing stop to capture extended moves.
+
+# ---------------------------------------------------------------------------
+# Time stop  (maximum hold duration)
+# ---------------------------------------------------------------------------
+# If a position hasn't reached its first partial-exit target within
+# TIME_STOP_DAYS, exit at market to free capital.
+TIME_STOP_ENABLED: bool = True
+TIME_STOP_DAYS: int = 30          # max holding period (calendar days)
+
+# ---------------------------------------------------------------------------
+# Scaled entry / buy ladder
+# ---------------------------------------------------------------------------
+# Instead of entering full size at one price, split the entry into N
+# tranches at progressively lower prices.  This improves average cost
+# when the dip continues and limits exposure if the thesis is wrong.
+#
+# How it works
+# ------------
+# 1. Tranche 1 (T1): placed at the current dip price — immediate entry.
+# 2. Tranche 2 (T2): placed 1.0×ATR below T1 price.
+# 3. Tranche 3 (T3): placed 2.0×ATR below T1 price (deeper dip).
+#
+# Each tranche's quantity is a fraction of the total position size
+# (from calculate_order).  The fractions should sum to 1.0.
+#
+# Abort / expiry logic
+# --------------------
+# - If RSI rises above SCALED_ENTRY_RSI_ABORT_LEVEL before T2/T3 fill,
+#   cancel unfilled tranches (momentum has reversed — no longer a dip).
+# - Unfilled limit orders expire after SCALED_ENTRY_EXPIRY_DAYS.
+# - RSI turn confirmation (optional): T2/T3 only fill if RSI has also
+#   turned down from the prior bar (confirming continuing weakness).
+SCALED_ENTRY_ENABLED: bool = True
+SCALED_ENTRY_N_TRANCHES: int = 3          # 1–5 tranches (1 = disabled)
+SCALED_ENTRY_FRACTIONS: tuple = (0.40, 0.35, 0.25)  # must sum to 1.0
+#   Front-load T1 so you always get partial exposure.
+SCALED_ENTRY_ATR_OFFSETS: tuple = (0.0, 1.0, 2.0)   # ATR multiples below T1
+#   T1=0 (market/limit at current), T2=−1×ATR, T3=−2×ATR
+SCALED_ENTRY_EXPIRY_DAYS: int = 5         # unfilled limits expire after 5 days
+SCALED_ENTRY_RSI_ABORT_LEVEL: float = 50.0  # cancel T2/T3 if RSI > this
+SCALED_ENTRY_RSI_TURN_REQUIRED: bool = True # T2/T3 require RSI declining bar-over-bar
+
+# ---------------------------------------------------------------------------
+# Simultaneous / portfolio-level sizing
+# ---------------------------------------------------------------------------
+# Capital budget: the dashboard allocates this across ALL positions
+# simultaneously, deducting each committed notional from the remaining pool.
+PORTFOLIO_CAPITAL: float = 80_000.0   # total account budget ($)
+MAX_CAPITAL_DEPLOYED_PCT: float = 0.80  # deploy at most 80% of budget at once
+#   Keeps 20% cash for margin, unexpected opportunities, or drawdown.
+
+# Kelly Criterion fractional sizing
+# The system uses the FRACTIONAL Kelly formula:
+#   full_kelly = (edge / odds)  where edge = win_rate − (1 − win_rate)/rr
+#   position_size = KELLY_FRACTION × full_kelly × equity
+# Set KELLY_FRACTION = 0 to disable and rely solely on fixed-risk sizing.
+KELLY_FRACTION: float = 0.25          # 1/4-Kelly (conservative; avoids ruin risk)
+KELLY_WIN_RATE: float = 0.52          # assumed win rate (conservative estimate)
+#   Updated dynamically if backtest data is available.
+
+# Volatility-regime scaling: shrink size in HIGH vol, expand in LOW vol.
+# Only applied when USE_ATR_STOPS = True (ATR-based stops already adapt, so
+# the vol-scaling provides an additional portfolio-heat guard).
+VOL_SCALE_HIGH: float = 0.65    # multiply base size by this in HIGH vol regime
+VOL_SCALE_NORMAL: float = 1.00  # no adjustment in NORMAL regime
+VOL_SCALE_LOW: float = 1.20     # modest increase in LOW vol (cap to MAX_POSITION_PCT)
+
+# Correlation-based position penalty
+# When an existing position in the same sector is already open, the new
+# position is scaled down to avoid concentration risk.
+CORRELATION_SAME_SECTOR_SCALE: float = 0.75  # 25% size cut for same-sector additions
+#   Sector grouping uses the ticker→sector mapping from EDGAR fundamentals.
 
 # ---------------------------------------------------------------------------
 # Dip-detection thresholds

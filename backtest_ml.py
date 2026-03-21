@@ -220,8 +220,73 @@ def walkforward_ml(
         if direction == "UP" and (position_open_until is None or i >= position_open_until):
             exit_bar = min(entry_bar + hold_days, len(closes) - 1)
             entry_px = float(opens.iloc[entry_bar])
-            exit_px  = float(opens.iloc[exit_bar])
-            trade_ret = (exit_px - entry_px) / entry_px if entry_px > 0 else 0.0
+
+            # ── Simulate trailing stop + partial exits bar-by-bar ─────────
+            # ATR estimate: use 14-bar average true range at entry
+            _hi = history["High"].iloc[max(0, entry_bar-14):entry_bar]
+            _lo = history["Low"].iloc[max(0, entry_bar-14):entry_bar]
+            _pc = closes.iloc[max(0, entry_bar-14):entry_bar]
+            if len(_hi) >= 2 and len(_lo) >= 2:
+                _tr = np.maximum(_hi.values[1:] - _lo.values[1:],
+                        np.maximum(np.abs(_hi.values[1:] - _pc.values[:-1]),
+                                   np.abs(_lo.values[1:] - _pc.values[:-1])))
+                atr_abs = float(np.mean(_tr)) if len(_tr) > 0 else entry_px * 0.02
+            else:
+                atr_abs = entry_px * 0.02  # fallback
+
+            from risk_manager import TrailingStopState, evaluate_partial_exits
+            stop_px = entry_px - config.ATR_STOP_MULTIPLIER * atr_abs
+            stop_px = max(stop_px, entry_px * (1 - config.ATR_MAX_STOP_PCT))
+            ts = TrailingStopState(entry_price=entry_px, atr_14_abs=atr_abs,
+                                  initial_stop=stop_px)
+
+            exit_px = None
+            exit_reason = "hold_expiry"
+            partials_taken: set[int] = set()
+            partial_pnl = 0.0  # cumulative P&L from partial exits
+            remaining_frac = 1.0  # fraction of position still held
+
+            # Time stop: limit max hold in calendar days (approx 1 bar ≈ 1 trading day)
+            time_stop_bar = exit_bar
+            if config.TIME_STOP_ENABLED:
+                time_stop_bar = min(entry_bar + config.TIME_STOP_DAYS, exit_bar)
+
+            for bar_j in range(entry_bar, time_stop_bar + 1):
+                bar_price = float(closes.iloc[bar_j])
+
+                # Update trailing stop
+                ts.update(bar_price)
+
+                # Check trailing stop hit
+                if bar_price <= ts.current_stop:
+                    exit_px = ts.current_stop
+                    exit_reason = f"trailing_{ts.stage_label}"
+                    break
+
+                # Check partial exits
+                pexits = evaluate_partial_exits(
+                    current_price=bar_price, entry_price=entry_px,
+                    atr_14_abs=atr_abs, exits_already_taken=partials_taken,
+                )
+                for pe in pexits:
+                    sell_frac = pe.fraction * remaining_frac
+                    partial_ret = (bar_price - entry_px) / entry_px
+                    partial_pnl += sell_frac * partial_ret
+                    remaining_frac -= sell_frac
+                    partials_taken.add(pe.exit_id)
+
+            # Time stop: if we reached the time limit without trailing stop exit
+            if exit_px is None and config.TIME_STOP_ENABLED and time_stop_bar < exit_bar:
+                exit_px = float(closes.iloc[time_stop_bar])
+                exit_reason = "time_stop"
+
+            # If no trailing/time stop was hit, exit at the hold-expiry bar
+            if exit_px is None:
+                exit_px = float(opens.iloc[exit_bar])
+
+            # Blended return: partial exits + remainder exit
+            remainder_ret = (exit_px - entry_px) / entry_px if entry_px > 0 else 0.0
+            trade_ret = partial_pnl + remaining_frac * remainder_ret
 
             # Record trade
             trades.append({
@@ -235,6 +300,9 @@ def walkforward_ml(
                 "auroc_at_entry": round(auroc_last, 4),
                 "direction":    direction,
                 "hold_bars":    exit_bar - entry_bar,
+                "exit_reason":  exit_reason,
+                "partials_taken": len(partials_taken),
+                "trail_stage":  ts.stage_label,
             })
             position_returns.append(trade_ret)
             position_open_until = i + hold_days  # no new trades until this expires

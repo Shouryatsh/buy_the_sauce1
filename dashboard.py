@@ -8,6 +8,7 @@ Tabs
   3. 📈 Back-test       Equity curve + trade log from results/backtest_trades.csv
   4. 🗂 Screen Log      Historical screener runs from results/screen_log.csv
   5. 📒 My Trades       Manual transaction journal — amounts, quantities, P&L
+  6. 🏠 System Overview  Portfolio-level summary of system health, recent activity, watchlist
 
 Usage
 -----
@@ -62,14 +63,18 @@ from dash import dcc, html, dash_table, Input, Output, State
 import dash_bootstrap_components as dbc
 
 import config
-from risk_manager import calculate_order
+from risk_manager import (
+    calculate_order, size_portfolio, PortfolioAllocation,
+    plan_scaled_entry, ScaledEntryPlan, Tranche,
+    TrailingStopState, evaluate_partial_exits, check_time_stop,
+)
 from run_screen import WATCHLIST
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-ACCOUNT_EQUITY  = 80_000.0   # user's stated budget
+ACCOUNT_EQUITY  = config.PORTFOLIO_CAPITAL  # single source of truth → config.py
 RESULTS_DIR     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 SCREEN_CSV      = os.path.join(RESULTS_DIR, "screen_log.csv")
 BACKTEST_CSV    = os.path.join(RESULTS_DIR, "backtest_trades.csv")
@@ -105,6 +110,7 @@ _HDR_STYLE = {
 _TRADES_COLS = [
     "date", "symbol", "action", "quantity", "entry_price",
     "exit_price", "amount_invested", "realized_pnl", "notes",
+    "asset_type",  # "STOCK" or "ETF" — ETFs are held forever (no exit targets)
 ]
 
 def _ensure_trades_csv():
@@ -141,6 +147,112 @@ def _delete_trade(idx: int):
     df = _load_trades()
     df = df.drop(index=idx).reset_index(drop=True)
     df.to_csv(TRADES_CSV, index=False)
+
+
+def _fetch_current_prices(symbols: list[str]) -> dict[str, float]:
+    """Fetch the latest closing price for each symbol.  Returns {symbol: price}."""
+    import edgar as _edgar
+    prices: dict[str, float] = {}
+    for sym in symbols:
+        try:
+            hist, _ = _edgar.get_price_history(sym, period_years=1)
+            if hist is not None and not hist.empty:
+                prices[sym] = float(hist["Close"].iloc[-1])
+        except Exception:
+            pass
+    return prices
+
+
+def _compute_exit_plan(entry_price: float, current_price: float, symbol: str,
+                       hist=None) -> dict:
+    """Compute ATR-based exit targets for an open position.
+
+    Returns dict with stop, target, partial-exit prices, trailing stop stage,
+    and ATR value.  All prices are rounded to 2dp.
+    """
+    result = {
+        "atr_14": None,
+        "stop_price": None,
+        "target_price": None,
+        "partial_1_price": None,
+        "partial_2_price": None,
+        "trail_stage": "—",
+        "trail_stop": None,
+    }
+    try:
+        import edgar as _edgar
+        if hist is None:
+            hist, _ = _edgar.get_price_history(symbol, period_years=1)
+        if hist is None or hist.empty or len(hist) < 15:
+            return result
+        # ATR(14)
+        h = hist["High"]
+        l = hist["Low"]
+        c = hist["Close"]
+        tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+        atr_abs = float(tr.rolling(14).mean().iloc[-1])
+        atr_frac = atr_abs / entry_price if entry_price > 0 else 0
+
+        result["atr_14"] = round(atr_abs, 2)
+
+        # Stop & target (same logic as risk_manager._compute_stops)
+        if config.USE_ATR_STOPS and atr_frac > 0:
+            raw_stop_pct = config.ATR_STOP_MULTIPLIER * atr_frac
+            stop_pct = max(config.ATR_MIN_STOP_PCT, min(raw_stop_pct, config.ATR_MAX_STOP_PCT))
+            target_pct = config.ATR_TARGET_MULTIPLIER * atr_frac
+        else:
+            stop_pct = config.STOP_LOSS_PCT
+            target_pct = config.TAKE_PROFIT_PCT
+
+        stop_price = entry_price * (1 - stop_pct)
+        target_price = entry_price * (1 + target_pct)
+        result["stop_price"] = round(stop_price, 2)
+        result["target_price"] = round(target_price, 2)
+
+        # Partial exit prices
+        result["partial_1_price"] = round(entry_price + config.PARTIAL_EXIT_1_TRIGGER_ATR * atr_abs, 2)
+        result["partial_2_price"] = round(entry_price + config.PARTIAL_EXIT_2_TRIGGER_ATR * atr_abs, 2)
+
+        # Trailing stop state simulation (where are we now?)
+        gain_atr = (current_price - entry_price) / atr_abs if atr_abs > 0 else 0
+        if gain_atr >= config.TRAILING_STAGE3_TRIGGER_ATR:
+            result["trail_stage"] = "TIGHT_TRAIL"
+            result["trail_stop"] = round(current_price - config.TRAILING_STAGE3_TRAIL_ATR * atr_abs, 2)
+        elif gain_atr >= config.TRAILING_STAGE2_TRIGGER_ATR:
+            result["trail_stage"] = "PROFIT_LOCK"
+            result["trail_stop"] = round(entry_price + 1.0 * atr_abs, 2)
+        elif gain_atr >= config.TRAILING_STAGE1_TRIGGER_ATR:
+            result["trail_stage"] = "BREAKEVEN"
+            result["trail_stop"] = round(entry_price, 2)
+        else:
+            result["trail_stage"] = "INITIAL"
+            result["trail_stop"] = result["stop_price"]
+    except Exception:
+        pass
+    return result
+
+
+# Known ETF tickers — used as fallback to auto-classify trades when asset_type
+# is not explicitly set.  Extend this list as you add new ETFs.
+_KNOWN_ETFS = {
+    "SPY", "QQQ", "IWM", "DIA", "VTI", "VOO", "VT", "VXUS",
+    "BND", "AGG", "TLT", "SHY", "IEF", "LQD", "HYG", "BNDX",
+    "VNQ", "SCHD", "VIG", "DGRO", "DVY", "HDV", "NOBL",
+    "SMH", "XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP",
+    "XLU", "XLB", "XLRE", "XLC",
+    "ARKK", "ARKW", "ARKG", "ARKF", "ARKQ",
+    "GLD", "SLV", "IAU", "GLDM",
+    "EEM", "VWO", "IEMG", "EFA", "VEA",
+    "SCHX", "SCHA", "SCHB", "SCHF", "SCHE", "SCHG", "SCHV",
+    "JEPI", "JEPQ", "DIVO",
+}
+
+
+def _infer_asset_type(symbol: str, explicit: str | None = None) -> str:
+    """Return 'ETF' or 'STOCK' — uses explicit value if set, else known-ETF list."""
+    if explicit and str(explicit).strip().upper() in ("ETF", "STOCK"):
+        return str(explicit).strip().upper()
+    return "ETF" if symbol.upper() in _KNOWN_ETFS else "STOCK"
 
 
 # ---------------------------------------------------------------------------
@@ -420,47 +532,103 @@ def _records_to_df(records: list[dict]) -> pd.DataFrame:
             "_fund_pass": fund_pass,
             "_ml_ok":     ml_ok,
             "_price":     price,
+            # extra swing/fundamental fields for portfolio-level sizing
+            "_atr_14":    sm.atr_14              if sm else None,
+            "_rr":        sm.reward_risk_ratio    if sm else None,
+            "_vol":       sm.vol_regime           if sm else None,
+            "_sector":    r["info"].get("sector") or r["info"].get("sectorDisp"),
+            "_ml_prob":   (s.ml_probability or 0.0) if s else 0.0,
+            "_signal":    signal_label,
         })
     return pd.DataFrame(rows)
 
 
-def _risk_df(screen_df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate position sizing for all dip candidates."""
+def _risk_df(screen_df: pd.DataFrame) -> tuple[pd.DataFrame, "PortfolioAllocation | None"]:
+    """Simultaneously size all dip candidates using the portfolio-level allocator.
+
+    Returns (display_df, PortfolioAllocation).
+    """
+    from risk_manager import size_portfolio
+
+    dip_df = screen_df[screen_df["_is_dip"] == True].copy()
+    if dip_df.empty:
+        return pd.DataFrame(), None
+
+    # Build candidates list — include all signals (BUY, DIP+FUND, DIP ONLY)
+    # so the portfolio allocator can prioritise them correctly.
+    candidates = []
+    for _, row in dip_df.iterrows():
+        candidates.append({
+            "symbol":           row["Symbol"],
+            "entry_price":      row.get("_price"),
+            "signal":           row.get("_signal") or row.get("Signal", ""),
+            "atr_14":           row.get("_atr_14"),
+            "reward_risk_ratio":row.get("_rr"),
+            "vol_regime":       row.get("_vol"),
+            "sector":           row.get("_sector"),
+            "ml_prob":          row.get("_ml_prob", 0.0),
+        })
+
+    alloc = size_portfolio(candidates, account_equity=ACCOUNT_EQUITY)
+
+    # Build display rows — include both accepted and skipped candidates
     rows = []
-    candidates = screen_df[screen_df["_is_dip"] == True].copy()
-    open_pos = 0
-    for _, row in candidates.iterrows():
-        price = row["_price"]
-        if not price:
-            continue
-        spec = calculate_order(
-            symbol         = row["Symbol"],
-            entry_price    = price,
-            account_equity = ACCOUNT_EQUITY,
-            open_positions = open_pos,
-        )
-        if spec is None:
+    accepted = {o.symbol: o for o in alloc.orders}
+    skipped  = {s["symbol"]: s["reason"] for s in alloc.skipped}
+
+    for _, row in dip_df.iterrows():
+        sym = row["Symbol"]
+        price = row.get("_price")
+        signal = row.get("_signal") or row.get("Signal", "")
+
+        if sym in accepted:
+            o = accepted[sym]
             rows.append({
-                "Symbol": row["Symbol"], "Signal": row["Signal"],
-                "Entry $": price, "Qty": "—", "Notional $": "—",
-                "Stop $": "—", "Target $": "—",
-                "Risk $": "—", "% Budget": "—", "Status": "Skipped",
+                "Symbol":     sym,
+                "Signal":     signal,
+                "Method":     o.stop_method,
+                "Sizing":     o.sizing_method,
+                "Entry $":    o.entry_price,
+                "Qty":        o.quantity,
+                "Notional $": round(o.position_value, 0),
+                "Stop $":     o.stop_loss_price,
+                "Stop %":     f"{o.stop_pct:.1%}",
+                "Target $":   o.take_profit_price,
+                "Target %":   f"{o.target_pct:.1%}",
+                "R/R":        o.reward_risk_ratio,
+                "Risk $":     round(o.risk_amount, 0),
+                "% Budget":   round(o.position_value / ACCOUNT_EQUITY * 100, 1),
+                "Vol Scale":  f"{o.vol_scale:.2f}×",
+                "Sect Scale": f"{o.sector_scale:.2f}×",
+                "Kelly Qty":  o.kelly_qty or "—",
+                "Risk Qty":   o.risk_qty,
+                "Status":     "✅ Allocated",
             })
-            continue
-        rows.append({
-            "Symbol":    spec.symbol,
-            "Signal":    row["Signal"],
-            "Entry $":   spec.entry_price,
-            "Qty":       spec.quantity,
-            "Notional $": round(spec.position_value, 0),
-            "Stop $":    spec.stop_loss_price,
-            "Target $":  spec.take_profit_price,
-            "Risk $":    round(spec.risk_amount, 0),
-            "% Budget":  round(spec.position_value / ACCOUNT_EQUITY * 100, 1),
-            "Status":    row["Signal"],
-        })
-        open_pos += 1
-    return pd.DataFrame(rows)
+        else:
+            reason = skipped.get(sym, "n/a")
+            rows.append({
+                "Symbol":     sym,
+                "Signal":     signal,
+                "Method":     "—",
+                "Sizing":     "—",
+                "Entry $":    price,
+                "Qty":        "—",
+                "Notional $": "—",
+                "Stop $":     "—",
+                "Stop %":     "—",
+                "Target $":   "—",
+                "Target %":   "—",
+                "R/R":        "—",
+                "Risk $":     "—",
+                "% Budget":   "—",
+                "Vol Scale":  "—",
+                "Sect Scale": "—",
+                "Kelly Qty":  "—",
+                "Risk Qty":   "—",
+                "Status":     f"⚠️ {reason}",
+            })
+
+    return pd.DataFrame(rows), alloc
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +750,7 @@ app.layout = html.Div(
                 dbc.Tab(label="📈  Back-test",      tab_id="tab-backtest"),
                 dbc.Tab(label="🗂  Screen Log",     tab_id="tab-log"),
                 dbc.Tab(label="📒  My Trades",      tab_id="tab-trades"),
+                dbc.Tab(label="🏠  System Overview", tab_id="tab-overview"),
             ], style={"marginBottom": "20px"}),
 
             html.Div(id="tab-content"),
@@ -660,47 +829,110 @@ def _screener_layout():
 # Tab 2 — Risk & Capital layout
 # ---------------------------------------------------------------------------
 
+def _build_live_positions_card():
+    """Build a dashboard card showing tracked live positions and their sell-side state."""
+    try:
+        from trader import get_open_positions_snapshot
+        positions = get_open_positions_snapshot()
+    except Exception:
+        positions = {}
+
+    if not positions:
+        return _card([
+            html.H6("🔴 Live Position Management",
+                    style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+            html.Div("No tracked positions.  Positions are registered when orders are placed in live mode.",
+                     style={"color": MUTED, "fontFamily": "monospace", "fontSize": "12px"}),
+        ])
+
+    rows = []
+    for sym, state in positions.items():
+        holding_days = (datetime.date.today() - state.entry_date).days
+        time_left = max(0, config.TIME_STOP_DAYS - holding_days) if config.TIME_STOP_ENABLED else "—"
+        rows.append({
+            "Symbol":        sym,
+            "Qty":           state.quantity,
+            "Entry $":       round(state.entry_price, 2),
+            "Entry Date":    str(state.entry_date),
+            "Hold Days":     holding_days,
+            "Time Left":     time_left,
+            "ATR $":         round(state.atr_14_abs, 2),
+            "Trail Stage":   state.trailing_stop.stage_label,
+            "Stop $":        round(state.trailing_stop.current_stop, 2),
+            "High $":        round(state.trailing_stop.highest_price, 2),
+            "Partials":      ", ".join(str(x) for x in sorted(state.partial_exits_taken)) or "none",
+            "Updates":       state.trailing_stop.n_updates,
+        })
+
+    pos_df = pd.DataFrame(rows)
+
+    # Colour-code trailing stop stages
+    stage_colours = [
+        {"if": {"filter_query": '{Trail Stage} = "INITIAL"',      "column_id": "Trail Stage"}, "color": MUTED},
+        {"if": {"filter_query": '{Trail Stage} = "BREAKEVEN"',    "column_id": "Trail Stage"}, "color": YELLOW},
+        {"if": {"filter_query": '{Trail Stage} = "PROFIT_LOCK"',  "column_id": "Trail Stage"}, "color": GREEN},
+        {"if": {"filter_query": '{Trail Stage} = "TIGHT_TRAIL"',  "column_id": "Trail Stage"}, "color": GREEN, "fontWeight": "bold"},
+    ]
+
+    pos_table = dash_table.DataTable(
+        id="live-positions-table",
+        columns=[{"name": c, "id": c} for c in pos_df.columns],
+        data=pos_df.to_dict("records"),
+        style_cell=_CELL_STYLE,
+        style_header=_HDR_STYLE,
+        style_data_conditional=stage_colours,
+        style_table={"overflowX": "auto", "borderRadius": "6px"},
+        sort_action="native",
+        page_size=20,
+    )
+
+    return _card([
+        html.H6("🟢 Live Position Management — Sell-Side State",
+                style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+        html.Div(
+            f"Tracked positions with trailing stops, partial exits, and time stops.  "
+            f"Time stop: {config.TIME_STOP_DAYS}d max hold.  "
+            f"Partial exits at +{config.PARTIAL_EXIT_1_TRIGGER_ATR:.0f}×ATR and +{config.PARTIAL_EXIT_2_TRIGGER_ATR:.0f}×ATR.  "
+            f"Trail stages: INITIAL → BREAKEVEN → PROFIT_LOCK → TIGHT_TRAIL.",
+            style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+        ),
+        pos_table,
+    ])
+
+
 def _risk_layout(screen_df: pd.DataFrame | None):
     if screen_df is None or screen_df.empty:
         return _card(html.Div("Run the screener first (📡 Screener → 🔄 Refresh).",
                                style={"color": MUTED, "fontFamily": "monospace"}))
 
-    risk_df = _risk_df(screen_df)
-    n_candidates = len(risk_df)
-
-    if risk_df.empty:
+    risk_df, alloc = _risk_df(screen_df)
+    if risk_df.empty or alloc is None:
         return _card(html.Div("No dip candidates found — nothing to size.",
                                style={"color": MUTED, "fontFamily": "monospace"}))
 
-    # ── summary stats ─────────────────────────────────────────────────────────
-    total_deployed = sum(
-        r for r in risk_df["Notional $"] if isinstance(r, (int, float))
-    )
-    total_risk     = sum(
-        r for r in risk_df["Risk $"] if isinstance(r, (int, float))
-    )
-    cash_remaining = ACCOUNT_EQUITY - total_deployed
-    pct_deployed   = total_deployed / ACCOUNT_EQUITY * 100
+    n_candidates  = len(alloc.orders)
+    total_deployed = alloc.total_notional
+    total_risk     = alloc.total_risk
+    cash_remaining = alloc.cash_remaining
+    pct_deployed   = alloc.pct_deployed * 100
+    max_deploy_cap = ACCOUNT_EQUITY * config.MAX_CAPITAL_DEPLOYED_PCT
 
     stat_cards = dbc.Row([
-        _stat_card("Budget",           f"${ACCOUNT_EQUITY:,.0f}", ACCENT),
-        _stat_card("Deployed",         f"${total_deployed:,.0f}  ({pct_deployed:.1f}%)",
-                   GREEN if pct_deployed <= 60 else YELLOW),
-        _stat_card("Cash Remaining",   f"${cash_remaining:,.0f}", TEXT),
-        _stat_card("Total $ at Risk",  f"${total_risk:,.0f}  ({total_risk/ACCOUNT_EQUITY*100:.1f}%)", RED),
-        _stat_card("Candidates",       str(n_candidates), ACCENT),
-        _stat_card("Max Positions",    str(config.MAX_POSITIONS), MUTED),
+        _stat_card("Budget",              f"${ACCOUNT_EQUITY:,.0f}",  ACCENT),
+        _stat_card("Max Deployable",      f"${max_deploy_cap:,.0f}  ({config.MAX_CAPITAL_DEPLOYED_PCT:.0%})",  MUTED),
+        _stat_card("Deployed",            f"${total_deployed:,.0f}  ({pct_deployed:.1f}%)",
+                   GREEN if pct_deployed <= config.MAX_CAPITAL_DEPLOYED_PCT * 100 else YELLOW),
+        _stat_card("Cash Remaining",      f"${cash_remaining:,.0f}",  TEXT),
+        _stat_card("Total $ at Risk",     f"${total_risk:,.0f}  ({total_risk/ACCOUNT_EQUITY*100:.1f}%)", RED),
+        _stat_card("Positions Allocated", str(n_candidates),          ACCENT),
+        _stat_card("Skipped",             str(len(alloc.skipped)),    MUTED),
     ], className="mb-3")
 
-    # ── position sizing table ─────────────────────────────────────────────────
     pos_table = _make_table(risk_df, "risk-table")
 
-    # ── capital allocation pie ────────────────────────────────────────────────
-    pie_labels = list(risk_df["Symbol"]) + ["Cash"]
-    pie_values = [
-        v if isinstance(v, (int, float)) else 0
-        for v in risk_df["Notional $"]
-    ] + [max(cash_remaining, 0)]
+    # ── capital allocation pie (use alloc.orders for accepted positions) ─────
+    pie_labels = [o.symbol for o in alloc.orders] + ["Cash"]
+    pie_values = [o.position_value for o in alloc.orders] + [max(cash_remaining, 0)]
 
     pie_fig = go.Figure(go.Pie(
         labels=pie_labels,
@@ -719,15 +951,11 @@ def _risk_layout(screen_df: pd.DataFrame | None):
                           font_size=18, showarrow=False, font_color=ACCENT)],
     )
 
-    # ── risk heat-map (symbol vs risk metrics) ────────────────────────────────
-    hm_syms  = list(risk_df["Symbol"])
-    hm_pct   = [v if isinstance(v, (int, float)) else 0 for v in risk_df["% Budget"]]
-    hm_risk  = [v if isinstance(v, (int, float)) else 0 for v in risk_df["Risk $"]]
-
-    # Stop loss distance %
-    sl_pct = config.STOP_LOSS_PCT * 100
-    tp_pct = config.TAKE_PROFIT_PCT * 100
-    rr     = tp_pct / sl_pct  # reward:risk ratio
+    # ── risk heat-map — % of budget + $ at risk for each accepted position ───
+    hm_syms = [o.symbol       for o in alloc.orders]
+    hm_pct  = [o.position_value / ACCOUNT_EQUITY * 100 for o in alloc.orders]
+    hm_risk = [o.risk_amount  for o in alloc.orders]
+    hm_rr   = [o.reward_risk_ratio for o in alloc.orders]
 
     heat_fig = go.Figure()
     heat_fig.add_trace(go.Bar(
@@ -736,7 +964,7 @@ def _risk_layout(screen_df: pd.DataFrame | None):
         textposition="outside",
     ))
     heat_fig.add_trace(go.Bar(
-        name="$ at Risk (hundreds)", x=hm_syms,
+        name="$ at Risk (÷100)", x=hm_syms,
         y=[r / 100 for r in hm_risk],
         marker_color=RED,
         text=[f"${r:,.0f}" for r in hm_risk],
@@ -747,6 +975,11 @@ def _risk_layout(screen_df: pd.DataFrame | None):
         line_color=YELLOW, annotation_text=f"Max position {config.MAX_POSITION_PCT:.0%}",
         annotation_font_color=YELLOW,
     )
+    heat_fig.add_hline(
+        y=config.MAX_CAPITAL_DEPLOYED_PCT * 100 / max(len(alloc.orders), 1),
+        line_dash="dot", line_color=MUTED,
+        annotation_text="Equal-weight", annotation_font_color=MUTED,
+    )
     heat_fig.update_layout(
         barmode="group",
         paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
@@ -756,41 +989,266 @@ def _risk_layout(screen_df: pd.DataFrame | None):
         margin=dict(t=20, b=10, l=10, r=10),
     )
 
+    # ── R/R bar (shows actual per-position reward:risk ratio) ─────────────────
+    rr_fig = go.Figure(go.Bar(
+        x=hm_syms, y=hm_rr,
+        marker_color=[GREEN if r >= 2.0 else YELLOW if r >= 1.5 else RED for r in hm_rr],
+        text=[f"{r:.2f}" for r in hm_rr],
+        textposition="outside",
+    ))
+    rr_fig.add_hline(y=2.0, line_dash="dash", line_color=GREEN,
+                     annotation_text="2:1 target", annotation_font_color=GREEN)
+    rr_fig.add_hline(y=1.0, line_dash="dot",  line_color=RED,
+                     annotation_text="1:1 min",   annotation_font_color=RED)
+    rr_fig.update_layout(
+        title="Reward : Risk by Position",
+        paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+        font=dict(color=TEXT),
+        xaxis=dict(color=TEXT), yaxis=dict(color=TEXT, gridcolor=BORDER, title="R/R Ratio"),
+        margin=dict(t=40, b=10, l=10, r=10),
+    )
+
     # ── risk parameters card ──────────────────────────────────────────────────
+    avg_rr   = sum(hm_rr) / len(hm_rr) if hm_rr else 0
+    kelly_enabled = config.KELLY_FRACTION > 0
     params_card = _card([
         html.H6("Risk Parameters", style={"color": ACCENT, "fontFamily": "monospace"}),
         html.Hr(style={"borderColor": BORDER}),
         dbc.Row([
             dbc.Col([
-                html.Div(f"Stop Loss:       {config.STOP_LOSS_PCT:.0%}  per trade", style={"fontFamily": "monospace", "fontSize": "13px"}),
-                html.Div(f"Take Profit:     {config.TAKE_PROFIT_PCT:.0%}  per trade", style={"fontFamily": "monospace", "fontSize": "13px"}),
-                html.Div(f"Reward : Risk:   {rr:.1f} : 1", style={"fontFamily": "monospace", "fontSize": "13px", "color": GREEN}),
+                html.Div(f"Stop method:     {'ATR-based' if config.USE_ATR_STOPS else 'Fixed %'}",
+                         style={"fontFamily": "monospace", "fontSize": "13px", "color": ACCENT}),
+                html.Div(f"ATR stop mult:   {config.ATR_STOP_MULTIPLIER}×  (clamp {config.ATR_MIN_STOP_PCT:.0%}–{config.ATR_MAX_STOP_PCT:.0%})",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"ATR target mult: {config.ATR_TARGET_MULTIPLIER}×",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"Fallback stop:   {config.STOP_LOSS_PCT:.0%}  fixed",
+                         style={"fontFamily": "monospace", "fontSize": "13px", "color": MUTED}),
+                html.Div(f"Portfolio avg RR: {avg_rr:.2f}:1",
+                         style={"fontFamily": "monospace", "fontSize": "13px", "color": GREEN}),
             ], width=4),
             dbc.Col([
-                html.Div(f"Risk per trade:  {config.RISK_PER_TRADE_PCT:.1%}  of equity  =  ${ACCOUNT_EQUITY * config.RISK_PER_TRADE_PCT:,.0f}", style={"fontFamily": "monospace", "fontSize": "13px"}),
-                html.Div(f"Max position:    {config.MAX_POSITION_PCT:.0%}  of equity  =  ${ACCOUNT_EQUITY * config.MAX_POSITION_PCT:,.0f}", style={"fontFamily": "monospace", "fontSize": "13px"}),
-                html.Div(f"Max positions:   {config.MAX_POSITIONS}  concurrent", style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"Risk per trade:  {config.RISK_PER_TRADE_PCT:.1%}  =  ${ACCOUNT_EQUITY * config.RISK_PER_TRADE_PCT:,.0f}",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"Max position:    {config.MAX_POSITION_PCT:.0%}  =  ${ACCOUNT_EQUITY * config.MAX_POSITION_PCT:,.0f}",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"Max deployed:    {config.MAX_CAPITAL_DEPLOYED_PCT:.0%}  =  ${ACCOUNT_EQUITY * config.MAX_CAPITAL_DEPLOYED_PCT:,.0f}",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"Max positions:   {config.MAX_POSITIONS}  concurrent",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
             ], width=4),
             dbc.Col([
-                html.Div(f"Max total risk:  ${ACCOUNT_EQUITY * config.RISK_PER_TRADE_PCT * config.MAX_POSITIONS:,.0f}  ({config.RISK_PER_TRADE_PCT * config.MAX_POSITIONS:.0%} of budget)", style={"fontFamily": "monospace", "fontSize": "13px", "color": RED}),
-                html.Div(f"Max deployed:    ${ACCOUNT_EQUITY * config.MAX_POSITION_PCT * config.MAX_POSITIONS:,.0f}  ({config.MAX_POSITION_PCT * config.MAX_POSITIONS:.0%} of budget)", style={"fontFamily": "monospace", "fontSize": "13px"}),
-                html.Div(f"Budget:          ${ACCOUNT_EQUITY:,.0f}", style={"fontFamily": "monospace", "fontSize": "13px", "color": ACCENT}),
+                html.Div(f"Kelly sizing:    {'✅ ON  (' + str(config.KELLY_FRACTION) + '×)' if kelly_enabled else '❌ OFF'}",
+                         style={"fontFamily": "monospace", "fontSize": "13px",
+                                "color": GREEN if kelly_enabled else MUTED}),
+                html.Div(f"Kelly win rate:  {config.KELLY_WIN_RATE:.0%}  (assumed)",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"Vol-scale HIGH:  {config.VOL_SCALE_HIGH:.2f}×  |  LOW: {config.VOL_SCALE_LOW:.2f}×",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"Sector penalty:  {config.CORRELATION_SAME_SECTOR_SCALE:.0%}  on same-sector add",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"Max portfolio risk: ${ACCOUNT_EQUITY * config.RISK_PER_TRADE_PCT * config.MAX_POSITIONS:,.0f}  ({config.RISK_PER_TRADE_PCT * config.MAX_POSITIONS:.0%})",
+                         style={"fontFamily": "monospace", "fontSize": "13px", "color": RED}),
             ], width=4),
         ]),
     ])
 
+    # ── Trailing stop & exit parameters card ──────────────────────────────────
+    trailing_enabled = config.TRAILING_STOP_ENABLED
+    partial_enabled  = config.PARTIAL_EXIT_ENABLED
+    time_stop_enabled = config.TIME_STOP_ENABLED
+    scaled_enabled   = config.SCALED_ENTRY_ENABLED
+
+    exit_card = _card([
+        html.H6("🛡️ Exit Strategy & Trailing Stop", style={"color": ACCENT, "fontFamily": "monospace"}),
+        html.Hr(style={"borderColor": BORDER}),
+        dbc.Row([
+            dbc.Col([
+                html.Div("Trailing Stop (3-stage adaptive)",
+                         style={"fontFamily": "monospace", "fontSize": "13px", "color": ACCENT, "fontWeight": "bold"}),
+                html.Div(f"  Enabled:         {'✅ ON' if trailing_enabled else '❌ OFF'}",
+                         style={"fontFamily": "monospace", "fontSize": "13px",
+                                "color": GREEN if trailing_enabled else MUTED}),
+                html.Div(f"  Stage 1 → BE:    +{config.TRAILING_STAGE1_TRIGGER_ATR:.1f}×ATR → trail = entry",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"  Stage 2 → Lock:  +{config.TRAILING_STAGE2_TRIGGER_ATR:.1f}×ATR → trail = entry + 1×ATR",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"  Stage 3 → Tight: +{config.TRAILING_STAGE3_TRIGGER_ATR:.1f}×ATR → trail = high − {config.TRAILING_STAGE3_TRAIL_ATR:.1f}×ATR",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+            ], width=4),
+            dbc.Col([
+                html.Div("Partial Profit-Taking",
+                         style={"fontFamily": "monospace", "fontSize": "13px", "color": ACCENT, "fontWeight": "bold"}),
+                html.Div(f"  Enabled:    {'✅ ON' if partial_enabled else '❌ OFF'}",
+                         style={"fontFamily": "monospace", "fontSize": "13px",
+                                "color": GREEN if partial_enabled else MUTED}),
+                html.Div(f"  Exit 1:     sell {config.PARTIAL_EXIT_1_FRACTION:.0%} @ +{config.PARTIAL_EXIT_1_TRIGGER_ATR:.1f}×ATR",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"  Exit 2:     sell {config.PARTIAL_EXIT_2_FRACTION:.0%} @ +{config.PARTIAL_EXIT_2_TRIGGER_ATR:.1f}×ATR",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"  Remainder:  rides trailing stop ({1 - config.PARTIAL_EXIT_1_FRACTION - config.PARTIAL_EXIT_2_FRACTION:.0%})",
+                         style={"fontFamily": "monospace", "fontSize": "13px", "color": MUTED}),
+            ], width=4),
+            dbc.Col([
+                html.Div("Time Stop",
+                         style={"fontFamily": "monospace", "fontSize": "13px", "color": ACCENT, "fontWeight": "bold"}),
+                html.Div(f"  Enabled:    {'✅ ON' if time_stop_enabled else '❌ OFF'}",
+                         style={"fontFamily": "monospace", "fontSize": "13px",
+                                "color": GREEN if time_stop_enabled else MUTED}),
+                html.Div(f"  Max hold:   {config.TIME_STOP_DAYS} calendar days",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div("",  style={"height": "8px"}),
+                html.Div("Scaled Entry (Buy Ladder)",
+                         style={"fontFamily": "monospace", "fontSize": "13px", "color": ACCENT, "fontWeight": "bold"}),
+                html.Div(f"  Enabled:    {'✅ ON' if scaled_enabled else '❌ OFF'}",
+                         style={"fontFamily": "monospace", "fontSize": "13px",
+                                "color": GREEN if scaled_enabled else MUTED}),
+                html.Div(f"  Tranches:   {config.SCALED_ENTRY_N_TRANCHES}  "
+                         f"({', '.join(f'{f:.0%}' for f in config.SCALED_ENTRY_FRACTIONS)})",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"  ATR offsets: {', '.join(f'{o:.1f}×' for o in config.SCALED_ENTRY_ATR_OFFSETS)}",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"  RSI abort:  >{config.SCALED_ENTRY_RSI_ABORT_LEVEL:.0f}  "
+                         f"| Turn req: {'yes' if config.SCALED_ENTRY_RSI_TURN_REQUIRED else 'no'}  "
+                         f"| Expiry: {config.SCALED_ENTRY_EXPIRY_DAYS}d",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+            ], width=4),
+        ]),
+    ])
+
+    # ── Scaled entry tranches table (per-symbol buy ladder) ──────────────────
+    scaled_section = html.Div()
+    if alloc and alloc.scaled_entries:
+        se_rows = []
+        for sym, plan in alloc.scaled_entries.items():
+            for row in plan.summary_table():
+                se_rows.append({"Symbol": sym, **row})
+
+        if se_rows:
+            se_df = pd.DataFrame(se_rows)
+
+            # Colour-code status
+            se_colours = [
+                {"if": {"filter_query": '{Status} = "PENDING"',   "column_id": "Status"}, "color": YELLOW},
+                {"if": {"filter_query": '{Status} = "FILLED"',    "column_id": "Status"}, "color": GREEN,  "fontWeight": "bold"},
+                {"if": {"filter_query": '{Status} = "CANCELLED"', "column_id": "Status"}, "color": RED},
+                {"if": {"filter_query": '{Status} = "EXPIRED"',   "column_id": "Status"}, "color": MUTED},
+            ]
+
+            se_table = dash_table.DataTable(
+                id="scaled-entry-table",
+                columns=[{"name": c, "id": c} for c in se_df.columns],
+                data=se_df.to_dict("records"),
+                style_cell=_CELL_STYLE,
+                style_header=_HDR_STYLE,
+                style_data_conditional=se_colours,
+                style_table={"overflowX": "auto", "borderRadius": "6px"},
+                sort_action="native",
+                filter_action="native",
+                page_size=40,
+            )
+
+            # Build a visual ladder chart
+            chart_traces = []
+            symbols_in_plan = list(alloc.scaled_entries.keys())
+            for sym in symbols_in_plan:
+                plan = alloc.scaled_entries[sym]
+                for t in plan.tranches:
+                    chart_traces.append({
+                        "symbol": sym,
+                        "label": f"T{t.tranche_id}",
+                        "price": t.limit_price,
+                        "qty": t.quantity,
+                    })
+                # Add stop line
+                chart_traces.append({
+                    "symbol": sym,
+                    "label": "STOP",
+                    "price": plan.stop_loss_price,
+                    "qty": 0,
+                })
+
+            ladder_fig = go.Figure()
+            for sym in symbols_in_plan:
+                sym_data = [d for d in chart_traces if d["symbol"] == sym and d["label"] != "STOP"]
+                stop_data = [d for d in chart_traces if d["symbol"] == sym and d["label"] == "STOP"]
+
+                ladder_fig.add_trace(go.Bar(
+                    name=sym,
+                    x=[f"{sym}\n{d['label']}" for d in sym_data],
+                    y=[d["price"] for d in sym_data],
+                    text=[f"{d['qty']}sh" for d in sym_data],
+                    textposition="outside",
+                ))
+
+                # Add stop line as a scatter marker
+                if stop_data:
+                    for sd in stop_data:
+                        ladder_fig.add_trace(go.Scatter(
+                            x=[f"{sym}\nT1", f"{sym}\nT{len(sym_data)}"],
+                            y=[sd["price"], sd["price"]],
+                            mode="lines",
+                            line=dict(color=RED, width=2, dash="dash"),
+                            name=f"{sym} stop",
+                            showlegend=False,
+                            hovertemplate=f"{sym} STOP: ${sd['price']:.2f}<extra></extra>",
+                        ))
+
+            ladder_fig.update_layout(
+                title="Buy Ladder — Tranche Limit Prices",
+                paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+                font=dict(color=TEXT),
+                xaxis=dict(gridcolor=BORDER, color=TEXT),
+                yaxis=dict(gridcolor=BORDER, color=TEXT, title="Price ($)"),
+                margin=dict(t=40, b=20, l=20, r=20),
+                barmode="group",
+                showlegend=True,
+                legend=dict(font=dict(color=TEXT)),
+            )
+
+            scaled_section = _card([
+                html.H6("🪜 Scaled Entry — Buy Ladder",
+                        style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+                html.Div(
+                    f"Split entry into {config.SCALED_ENTRY_N_TRANCHES} tranches at progressively lower prices.  "
+                    f"T1 = immediate.  T2/T3 fill only if price dips further AND RSI confirms.  "
+                    f"Unfilled tranches expire after {config.SCALED_ENTRY_EXPIRY_DAYS}d or abort if RSI > {config.SCALED_ENTRY_RSI_ABORT_LEVEL:.0f}.",
+                    style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+                ),
+                dbc.Row([
+                    dbc.Col(dcc.Graph(figure=ladder_fig, config={"displayModeBar": False}), width=6),
+                    dbc.Col(se_table, width=6),
+                ]),
+            ])
+
+    # ── Live position management state  ──────────────────────────────────────
+    live_positions_section = _build_live_positions_card()
+
     return html.Div([
         stat_cards,
         params_card,
-        _card(html.H6("Capital Allocation", style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "12px"})),
-        dbc.Row([
-            dbc.Col(_card(dcc.Graph(figure=pie_fig, config={"displayModeBar": False})), width=4),
-            dbc.Col(_card(dcc.Graph(figure=heat_fig, config={"displayModeBar": False})), width=8),
-        ], className="mb-3"),
+        exit_card,
         _card([
-            html.H6("Position Sizing — All Dip Candidates", style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "12px"}),
+            html.H6("📊 Capital Allocation", style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "12px"}),
+            dbc.Row([
+                dbc.Col(_card(dcc.Graph(figure=pie_fig,  config={"displayModeBar": False})), width=4),
+                dbc.Col(_card(dcc.Graph(figure=heat_fig, config={"displayModeBar": False})), width=5),
+                dbc.Col(_card(dcc.Graph(figure=rr_fig,   config={"displayModeBar": False})), width=3),
+            ], className="mb-0"),
+        ]),
+        _card([
+            html.H6("💼 Position Sizing — Simultaneous Portfolio Allocation",
+                    style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+            html.Div(
+                "Candidates ranked by signal quality (BUY→DIP+FUND→DIP ONLY) then ML prob.  "
+                "Stop & Target are ATR-based where available, else fixed %.  "
+                "Vol Scale = volatility-regime multiplier.  Sect Scale = same-sector penalty.",
+                style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+            ),
             pos_table,
         ]),
+        scaled_section,
+        live_positions_section,
     ])
 
 
@@ -1022,23 +1480,260 @@ def _trades_layout():
     """Build the full My Trades tab layout (form + summary + chart + table)."""
     df = _load_trades()
 
-    # ── summary stat cards ────────────────────────────────────────────────────
+    # ── Ensure asset_type is populated ────────────────────────────────────────
+    if not df.empty:
+        if "asset_type" not in df.columns:
+            df["asset_type"] = None
+        df["asset_type"] = df.apply(
+            lambda r: _infer_asset_type(r["symbol"], r.get("asset_type")), axis=1
+        )
+
+    # ── Fetch live prices for all held symbols ────────────────────────────────
+    open_buys = df[df["action"] == "BUY"] if not df.empty else pd.DataFrame()
+    held_symbols = list(open_buys["symbol"].unique()) if not open_buys.empty else []
+    current_prices = _fetch_current_prices(held_symbols) if held_symbols else {}
+
+    # ── Build per-symbol position summary (aggregate multiple buys) ───────────
+    # Net position per symbol: sum of BUY qty minus sum of SELL qty
+    pos_map: dict[str, dict] = {}  # sym → {qty, cost_basis, invested, asset_type}
+    if not df.empty:
+        for _, row in df.iterrows():
+            sym = row["symbol"]
+            if sym not in pos_map:
+                pos_map[sym] = {"qty": 0, "total_cost": 0.0, "invested": 0.0,
+                                "asset_type": _infer_asset_type(sym, row.get("asset_type"))}
+            if row["action"] == "BUY":
+                q = float(row["quantity"] or 0)
+                p = float(row["entry_price"] or 0)
+                pos_map[sym]["qty"] += q
+                pos_map[sym]["total_cost"] += q * p
+                pos_map[sym]["invested"] += float(row["amount_invested"] or 0)
+            elif row["action"] == "SELL":
+                pos_map[sym]["qty"] -= float(row["quantity"] or 0)
+
+    # Remove closed positions (qty ≤ 0)
+    pos_map = {s: v for s, v in pos_map.items() if v["qty"] > 0}
+
+    # ── Compute unrealized P&L & exit plans ───────────────────────────────────
+    total_market_value = 0.0
+    total_unrealized = 0.0
+    total_invested_open = 0.0
+
+    position_rows = []
+    for sym, pos in pos_map.items():
+        cur_price = current_prices.get(sym)
+        avg_entry = pos["total_cost"] / pos["qty"] if pos["qty"] > 0 else 0
+        mkt_val = cur_price * pos["qty"] if cur_price else None
+        unreal = (cur_price - avg_entry) * pos["qty"] if cur_price else None
+        unreal_pct = ((cur_price / avg_entry) - 1) * 100 if cur_price and avg_entry > 0 else None
+
+        if mkt_val is not None:
+            total_market_value += mkt_val
+        if unreal is not None:
+            total_unrealized += unreal
+        total_invested_open += pos["invested"]
+
+        is_etf = pos["asset_type"] == "ETF"
+
+        # Exit plan (only for stocks — ETFs are hold-forever)
+        if is_etf:
+            ep = {"atr_14": None, "stop_price": "∞ HOLD",
+                  "target_price": "∞ HOLD",
+                  "partial_1_price": "—", "partial_2_price": "—",
+                  "trail_stage": "HOLD FOREVER", "trail_stop": "—"}
+        else:
+            ep = _compute_exit_plan(avg_entry, cur_price or avg_entry, sym)
+
+        position_rows.append({
+            "Symbol":       sym,
+            "Type":         "📦 ETF" if is_etf else "📈 Stock",
+            "Qty":          int(pos["qty"]),
+            "Avg Entry $":  round(avg_entry, 2),
+            "Current $":    round(cur_price, 2) if cur_price else "n/a",
+            "Mkt Value $":  round(mkt_val, 0) if mkt_val else "n/a",
+            "Unreal P&L $": round(unreal, 2) if unreal is not None else "n/a",
+            "Unreal %":     f"{unreal_pct:+.1f}%" if unreal_pct is not None else "n/a",
+            "ATR(14) $":    ep["atr_14"] or "—",
+            "Stop $":       ep["stop_price"] or "—",
+            "Partial 1 $":  ep["partial_1_price"] or "—",
+            "Partial 2 $":  ep["partial_2_price"] or "—",
+            "Target $":     ep["target_price"] or "—",
+            "Trail Stage":  ep["trail_stage"],
+            "Trail Stop $": ep["trail_stop"] or "—",
+            "% Budget":     round((mkt_val / ACCOUNT_EQUITY * 100), 1) if mkt_val else "—",
+        })
+
+    pos_df = pd.DataFrame(position_rows) if position_rows else pd.DataFrame()
+
+    # ── Summary stats ─────────────────────────────────────────────────────────
     total_invested  = df["amount_invested"].sum() if not df.empty else 0
     realized_pnl    = df["realized_pnl"].dropna().sum() if not df.empty else 0
     n_trades        = len(df)
     n_wins          = int((df["realized_pnl"] > 0).sum()) if not df.empty else 0
     win_rate        = n_wins / n_trades if n_trades > 0 else 0
     roi_pct         = realized_pnl / total_invested * 100 if total_invested else 0
+    cash_available  = max(ACCOUNT_EQUITY - total_market_value, 0)
+    pct_utilised    = total_market_value / ACCOUNT_EQUITY * 100 if ACCOUNT_EQUITY else 0
+
+    # ETF vs Stock breakdown
+    etf_value = sum(
+        (current_prices.get(s, 0) * pos_map[s]["qty"])
+        for s in pos_map if pos_map[s]["asset_type"] == "ETF"
+    )
+    stock_value = total_market_value - etf_value
 
     stat_row = dbc.Row([
         _stat_card("Total Trades",      str(n_trades),                    ACCENT),
-        _stat_card("Total Invested",    f"${total_invested:,.0f}",        TEXT),
+        _stat_card("Total Mkt Value",   f"${total_market_value:,.0f}",    ACCENT),
+        _stat_card("% Utilised",        f"{pct_utilised:.1f}%",
+                   GREEN if pct_utilised <= config.MAX_CAPITAL_DEPLOYED_PCT * 100 else RED),
+        _stat_card("💵 Cash Available", f"${cash_available:,.0f}",        GREEN if cash_available > 0 else RED),
+        _stat_card("Unrealized P&L",    f"${total_unrealized:+,.2f}",     GREEN if total_unrealized >= 0 else RED),
         _stat_card("Realized P&L",      f"${realized_pnl:+,.2f}",        GREEN if realized_pnl >= 0 else RED),
-        _stat_card("ROI %",             f"{roi_pct:+.2f}%",               GREEN if roi_pct >= 0 else RED),
-        _stat_card("Win Rate",          f"{win_rate:.0%}  ({n_wins}/{n_trades})", GREEN if win_rate >= 0.5 else (YELLOW if n_trades else MUTED)),
+        _stat_card("Win Rate",          f"{win_rate:.0%}  ({n_wins}/{n_trades})",
+                   GREEN if win_rate >= 0.5 else (YELLOW if n_trades else MUTED)),
     ], className="mb-3")
 
-    # ── cumulative P&L chart ──────────────────────────────────────────────────
+    # Second row: ETF vs Stock breakdown
+    stat_row2 = dbc.Row([
+        _stat_card("📦 ETF Holdings",    f"${etf_value:,.0f}", ACCENT),
+        _stat_card("📈 Stock Holdings",   f"${stock_value:,.0f}", YELLOW),
+        _stat_card("Budget",              f"${ACCOUNT_EQUITY:,.0f}", MUTED),
+        _stat_card("ROI % (realized)",    f"{roi_pct:+.2f}%", GREEN if roi_pct >= 0 else RED),
+    ], className="mb-3")
+
+    # ── Open Positions with Exit Plan table ───────────────────────────────────
+    if not pos_df.empty:
+        exit_colours = [
+            # Type colouring
+            {"if": {"filter_query": '{Type} contains "ETF"',   "column_id": "Type"},       "color": ACCENT},
+            {"if": {"filter_query": '{Type} contains "Stock"', "column_id": "Type"},       "color": YELLOW},
+            # Unrealised P&L
+            {"if": {"filter_query": '{Unreal %} contains "+"', "column_id": "Unreal %"},  "color": GREEN, "fontWeight": "bold"},
+            {"if": {"filter_query": '{Unreal %} contains "-"', "column_id": "Unreal %"},  "color": RED,   "fontWeight": "bold"},
+            {"if": {"filter_query": '{Unreal P&L $} > 0',     "column_id": "Unreal P&L $"}, "color": GREEN},
+            {"if": {"filter_query": '{Unreal P&L $} < 0',     "column_id": "Unreal P&L $"}, "color": RED},
+            # Trail stage
+            {"if": {"filter_query": '{Trail Stage} = "INITIAL"',      "column_id": "Trail Stage"}, "color": MUTED},
+            {"if": {"filter_query": '{Trail Stage} = "BREAKEVEN"',    "column_id": "Trail Stage"}, "color": YELLOW},
+            {"if": {"filter_query": '{Trail Stage} = "PROFIT_LOCK"',  "column_id": "Trail Stage"}, "color": GREEN},
+            {"if": {"filter_query": '{Trail Stage} = "TIGHT_TRAIL"',  "column_id": "Trail Stage"}, "color": GREEN, "fontWeight": "bold"},
+            {"if": {"filter_query": '{Trail Stage} = "HOLD FOREVER"', "column_id": "Trail Stage"}, "color": ACCENT, "fontWeight": "bold"},
+        ]
+
+        exit_table = dash_table.DataTable(
+            id="exit-plan-table",
+            columns=[{"name": c, "id": c} for c in pos_df.columns],
+            data=pos_df.to_dict("records"),
+            style_cell=_CELL_STYLE,
+            style_header=_HDR_STYLE,
+            style_data_conditional=exit_colours,
+            style_table={"overflowX": "auto", "borderRadius": "6px"},
+            sort_action="native",
+            page_size=40,
+        )
+
+        exit_plan_section = _card([
+            html.H6("🎯 Open Positions — Live Prices & Scaled Exit Plan",
+                    style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+            html.Div(
+                f"Current prices fetched live.  "
+                f"Stocks: ATR-based exits — "
+                f"Partial 1 = sell {config.PARTIAL_EXIT_1_FRACTION:.0%} @ +{config.PARTIAL_EXIT_1_TRIGGER_ATR:.0f}×ATR,  "
+                f"Partial 2 = sell {config.PARTIAL_EXIT_2_FRACTION:.0%} @ +{config.PARTIAL_EXIT_2_TRIGGER_ATR:.0f}×ATR,  "
+                f"remainder rides trailing stop.  "
+                f"ETFs = hold forever (no exit targets).",
+                style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+            ),
+            exit_table,
+        ])
+    else:
+        exit_plan_section = _card(
+            html.Div("No open positions. Log a BUY trade to see exit targets.",
+                     style={"color": MUTED, "fontFamily": "monospace"})
+        )
+
+    # ── Utilisation donut: ETF / Stock / Cash ─────────────────────────────────
+    util_fig = go.Figure(go.Pie(
+        labels=["📦 ETFs", "📈 Stocks", "💵 Cash"],
+        values=[max(etf_value, 0), max(stock_value, 0), max(cash_available, 0)],
+        hole=0.55,
+        marker=dict(colors=[ACCENT, YELLOW, GREEN]),
+        textinfo="label+percent",
+        textfont=dict(color=TEXT, size=12),
+        hovertemplate="%{label}: $%{value:,.0f}  (%{percent})<extra></extra>",
+    ))
+    util_fig.update_layout(
+        paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+        font=dict(color=TEXT),
+        margin=dict(t=30, b=10, l=10, r=10),
+        showlegend=True,
+        legend=dict(font=dict(color=TEXT)),
+        annotations=[dict(text=f"${ACCOUNT_EQUITY/1e3:.0f}k", x=0.5, y=0.5,
+                          font_size=18, showarrow=False, font_color=ACCENT)],
+    )
+
+    # ── Per-symbol unrealized P&L bar ─────────────────────────────────────────
+    if position_rows:
+        sym_names = [r["Symbol"] for r in position_rows]
+        sym_unreal = []
+        for r in position_rows:
+            v = r["Unreal P&L $"]
+            sym_unreal.append(float(v) if isinstance(v, (int, float)) else 0)
+
+        unreal_fig = go.Figure(go.Bar(
+            x=sym_names, y=sym_unreal,
+            marker_color=[GREEN if v >= 0 else RED for v in sym_unreal],
+            text=[f"${v:+,.0f}" for v in sym_unreal],
+            textposition="outside",
+        ))
+        unreal_fig.add_hline(y=0, line_color=BORDER, line_dash="dash")
+        unreal_fig.update_layout(
+            title="Unrealized P&L by Position",
+            paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+            font=dict(color=TEXT),
+            xaxis=dict(color=TEXT), yaxis=dict(color=TEXT, gridcolor=BORDER, title="P&L ($)"),
+            margin=dict(t=40, b=20, l=20, r=20),
+        )
+
+        # Per-symbol % of budget bar
+        sym_budget_pcts = []
+        for r in position_rows:
+            v = r["% Budget"]
+            sym_budget_pcts.append(float(v) if isinstance(v, (int, float)) else 0)
+
+        budget_fig = go.Figure(go.Bar(
+            x=sym_names, y=sym_budget_pcts,
+            marker_color=[
+                ACCENT if pos_map.get(s, {}).get("asset_type") == "ETF" else YELLOW
+                for s in sym_names
+            ],
+            text=[f"{v:.1f}%" for v in sym_budget_pcts],
+            textposition="outside",
+        ))
+        budget_fig.add_hline(
+            y=config.MAX_POSITION_PCT * 100, line_dash="dash", line_color=RED,
+            annotation_text=f"Max {config.MAX_POSITION_PCT:.0%}", annotation_font_color=RED,
+        )
+        budget_fig.update_layout(
+            title="Position Size — % of Budget",
+            paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+            font=dict(color=TEXT),
+            xaxis=dict(color=TEXT), yaxis=dict(color=TEXT, gridcolor=BORDER, title="% Budget"),
+            margin=dict(t=40, b=20, l=20, r=20),
+        )
+
+        charts_row1 = dbc.Row([
+            dbc.Col(_card(dcc.Graph(figure=util_fig,   config={"displayModeBar": False})), width=4),
+            dbc.Col(_card(dcc.Graph(figure=unreal_fig, config={"displayModeBar": False})), width=4),
+            dbc.Col(_card(dcc.Graph(figure=budget_fig, config={"displayModeBar": False})), width=4),
+        ], className="mb-3")
+    else:
+        charts_row1 = dbc.Row([
+            dbc.Col(_card(dcc.Graph(figure=util_fig, config={"displayModeBar": False})), width=12),
+        ], className="mb-3")
+
+    # ── Cumulative realized P&L chart (existing) ──────────────────────────────
     if not df.empty and df["realized_pnl"].notna().any():
         pnl_df = df[df["realized_pnl"].notna()].copy()
         pnl_df = pnl_df.sort_values("date")
@@ -1066,62 +1761,11 @@ def _trades_layout():
             yaxis=dict(gridcolor=BORDER, color=TEXT, title="Cumulative P&L ($)"),
             margin=dict(t=40, b=20, l=20, r=20),
         )
-
-        # Per-symbol P&L bar
-        sym_pnl = pnl_df.groupby("symbol")["realized_pnl"].sum().reset_index()
-        sym_pnl.columns = ["Symbol", "P&L"]
-        sym_fig = go.Figure(go.Bar(
-            x=sym_pnl["Symbol"], y=sym_pnl["P&L"],
-            marker_color=[GREEN if v >= 0 else RED for v in sym_pnl["P&L"]],
-            text=[f"${v:+,.2f}" for v in sym_pnl["P&L"]],
-            textposition="outside",
-        ))
-        sym_fig.add_hline(y=0, line_color=BORDER, line_dash="dash")
-        sym_fig.update_layout(
-            title="Realized P&L by Symbol",
-            paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
-            font=dict(color=TEXT),
-            xaxis=dict(color=TEXT), yaxis=dict(color=TEXT, gridcolor=BORDER, title="P&L ($)"),
-            margin=dict(t=40, b=20, l=20, r=20),
-        )
-
-        # Per-symbol Exposure % bar (amount_invested / ACCOUNT_EQUITY * 100)
-        sym_exp = df.groupby("symbol")["amount_invested"].sum().reset_index()
-        sym_exp["exposure_pct"] = (sym_exp["amount_invested"] / ACCOUNT_EQUITY * 100).round(2)
-        sym_exp = sym_exp.sort_values("exposure_pct", ascending=False)
-        exp_colors = [
-            GREEN if v <= 10 else YELLOW if v <= 20 else RED
-            for v in sym_exp["exposure_pct"]
-        ]
-        exp_fig = go.Figure(go.Bar(
-            x=sym_exp["symbol"], y=sym_exp["exposure_pct"],
-            marker_color=exp_colors,
-            text=[f"{v:.1f}%" for v in sym_exp["exposure_pct"]],
-            textposition="outside",
-        ))
-        exp_fig.add_hline(y=10,  line_color=GREEN,  line_dash="dot",
-                          annotation_text="10%", annotation_font_color=GREEN)
-        exp_fig.add_hline(y=20,  line_color=YELLOW, line_dash="dot",
-                          annotation_text="20%", annotation_font_color=YELLOW)
-        exp_fig.update_layout(
-            title=f"% Budget Exposure by Symbol  (budget = ${ACCOUNT_EQUITY:,.0f})",
-            paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
-            font=dict(color=TEXT),
-            xaxis=dict(color=TEXT),
-            yaxis=dict(color=TEXT, gridcolor=BORDER, title="% of Budget", ticksuffix="%"),
-            margin=dict(t=40, b=20, l=20, r=20),
-        )
-
-        charts = dbc.Row([
-            dbc.Col(_card(dcc.Graph(figure=pnl_fig, config={"displayModeBar": False})), width=8),
-            dbc.Col(_card(dcc.Graph(figure=sym_fig, config={"displayModeBar": False})), width=4),
-        ], className="mb-3")
-        exp_chart = dbc.Row([
-            dbc.Col(_card(dcc.Graph(figure=exp_fig, config={"displayModeBar": False})), width=12),
+        realized_charts = dbc.Row([
+            dbc.Col(_card(dcc.Graph(figure=pnl_fig, config={"displayModeBar": False})), width=12),
         ], className="mb-3")
     else:
-        charts = html.Div()
-        exp_chart = html.Div()
+        realized_charts = html.Div()
 
     # ── trade entry form ──────────────────────────────────────────────────────
     form_card = _card([
@@ -1141,6 +1785,19 @@ def _trades_layout():
                 dcc.Input(id="trade-symbol", type="text", placeholder="AAPL",
                           debounce=True, style=_INPUT_STYLE),
             ], width=2),
+            dbc.Col([
+                html.Label("Type", style={"color": MUTED, "fontSize": "12px"}),
+                dcc.Dropdown(
+                    id="trade-asset-type",
+                    options=[
+                        {"label": "📈 Stock", "value": "STOCK"},
+                        {"label": "📦 ETF",   "value": "ETF"},
+                    ],
+                    value="STOCK",
+                    style={"backgroundColor": "#21262d", "color": BRAND_BG, "fontFamily": "monospace"},
+                    clearable=False,
+                ),
+            ], width=1),
             dbc.Col([
                 html.Label("Action", style={"color": MUTED, "fontSize": "12px"}),
                 dcc.Dropdown(
@@ -1165,7 +1822,7 @@ def _trades_layout():
                 html.Label("Exit Price $ (opt)", style={"color": MUTED, "fontSize": "12px"}),
                 dcc.Input(id="trade-exit", type="number", placeholder="165.00",
                           debounce=True, style=_INPUT_STYLE),
-            ], width=2),
+            ], width=1),
             dbc.Col([
                 html.Label("Notes (opt)", style={"color": MUTED, "fontSize": "12px"}),
                 dcc.Input(id="trade-notes", type="text", placeholder="Screener signal",
@@ -1188,9 +1845,11 @@ def _trades_layout():
         html.Div([
             html.Hr(style={"borderColor": BORDER, "marginTop": "16px"}),
             html.Div([
-                html.Span("💡 Realized P&L is auto-calculated from Entry/Exit when you save a SELL trade. "
-                          "You can also enter it manually via CSV at ",
+                html.Span("💡 Auto-detects ETFs (SMH, SCHD, SPY, QQQ, …). "
+                          "ETFs are excluded from swing exit logic and counted as long-term holds. "
+                          "Realized P&L auto-calculated on SELL trades. ",
                           style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace"}),
+                html.Span("CSV: ", style={"color": MUTED, "fontSize": "11px"}),
                 html.Code("results/my_trades.csv",
                           style={"color": ACCENT, "fontSize": "11px"}),
             ]),
@@ -1200,20 +1859,33 @@ def _trades_layout():
     # ── trade log table ───────────────────────────────────────────────────────
     if not df.empty:
         display_df = df.copy()
-        # Add % Exposure column = amount_invested / total budget × 100
+        # Add computed columns
         display_df["exposure_pct"] = (
             display_df["amount_invested"] / ACCOUNT_EQUITY * 100
         ).round(2)
-        display_df.columns = ["Date", "Symbol", "Action", "Qty", "Entry $",
-                               "Exit $", "Invested $", "Realized P&L $", "Notes", "Exposure %"]
+        # Add current price & unrealized P&L
+        display_df["current_price"] = display_df["symbol"].map(current_prices)
+        display_df["unrealized_pnl"] = display_df.apply(
+            lambda r: round((r["current_price"] - r["entry_price"]) * r["quantity"], 2)
+            if pd.notna(r.get("current_price")) and r["action"] == "BUY" else None,
+            axis=1,
+        )
 
-        # Reorder so Exposure % sits right after Invested $
-        display_df = display_df[["Date", "Symbol", "Action", "Qty", "Entry $",
-                                  "Exit $", "Invested $", "Exposure %",
-                                  "Realized P&L $", "Notes"]]
+        display_df.columns = [
+            "Date", "Symbol", "Action", "Qty", "Entry $",
+            "Exit $", "Invested $", "Realized P&L $", "Notes", "Type",
+            "Exposure %", "Current $", "Unrealized P&L $",
+        ]
+
+        # Reorder columns
+        display_df = display_df[[
+            "Date", "Symbol", "Type", "Action", "Qty", "Entry $", "Current $",
+            "Exit $", "Invested $", "Exposure %",
+            "Unrealized P&L $", "Realized P&L $", "Notes",
+        ]]
 
         table_section = _card([
-            html.H6(f"Trade Journal  ({n_trades} entries)",
+            html.H6(f"📒 Trade Journal  ({n_trades} entries)",
                     style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "12px"}),
             _make_table(display_df, "trades-table"),
             html.Div([
@@ -1232,7 +1904,328 @@ def _trades_layout():
                      style={"color": MUTED, "fontFamily": "monospace"})
         )
 
-    return html.Div([stat_row, charts, exp_chart, form_card, table_section])
+    return html.Div([stat_row, stat_row2, charts_row1, exit_plan_section,
+                      realized_charts, form_card, table_section])
+
+
+# ---------------------------------------------------------------------------
+# Tab 6 — System Overview (portfolio / system health)
+# ---------------------------------------------------------------------------
+
+def _overview_layout():
+    """Build the 🏠 System Overview tab — a single-screen snapshot of system health."""
+    now = datetime.datetime.now()
+
+    # ── 1. Connectivity & ML status ──────────────────────────────────────────
+    ibkr_ok, ibkr_msg = _check_ibkr_status()
+    ibkr_colour = GREEN if ibkr_ok else RED
+
+    ml_status = "✅ Enabled" if config.ML_ENABLED else "❌ Disabled"
+    ml_colour = GREEN if config.ML_ENABLED else MUTED
+    if _ML_MISSING:
+        ml_status = f"⚠️ Missing: {', '.join(_ML_MISSING)}"
+        ml_colour = YELLOW
+
+    trailing_status = "✅ ON" if config.TRAILING_STOP_ENABLED else "❌ OFF"
+    partial_status  = "✅ ON" if config.PARTIAL_EXIT_ENABLED else "❌ OFF"
+    time_stop_status = "✅ ON" if config.TIME_STOP_ENABLED else "❌ OFF"
+    scaled_status   = "✅ ON" if config.SCALED_ENTRY_ENABLED else "❌ OFF"
+    atr_status      = "✅ ATR-based" if config.USE_ATR_STOPS else "⚠️ Fixed %"
+
+    status_card = _card([
+        html.H6("🖥️ System Status", style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "12px"}),
+        dbc.Row([
+            dbc.Col([
+                html.Div("Connectivity", style={"color": ACCENT, "fontFamily": "monospace", "fontWeight": "bold", "fontSize": "13px", "marginBottom": "6px"}),
+                html.Div(ibkr_msg, style={"fontFamily": "monospace", "fontSize": "13px", "color": ibkr_colour}),
+                html.Div(f"ML Ensemble:  {ml_status}", style={"fontFamily": "monospace", "fontSize": "13px", "color": ml_colour}),
+                html.Div(f"Python:  {sys.executable}", style={"fontFamily": "monospace", "fontSize": "11px", "color": MUTED, "marginTop": "4px"}),
+                html.Div(f"Dashboard started:  {now:%Y-%m-%d %H:%M}", style={"fontFamily": "monospace", "fontSize": "11px", "color": MUTED}),
+            ], width=6),
+            dbc.Col([
+                html.Div("Feature Flags", style={"color": ACCENT, "fontFamily": "monospace", "fontWeight": "bold", "fontSize": "13px", "marginBottom": "6px"}),
+                html.Div(f"Stop method:       {atr_status}", style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"Trailing stop:     {trailing_status}", style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"Partial exits:     {partial_status}", style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"Time stop:         {time_stop_status}", style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"Scaled entry:      {scaled_status}", style={"fontFamily": "monospace", "fontSize": "13px"}),
+            ], width=6),
+        ]),
+    ])
+
+    # ── 2. Open positions summary ────────────────────────────────────────────
+    try:
+        from trader import get_open_positions_snapshot
+        positions = get_open_positions_snapshot()
+    except Exception:
+        positions = {}
+
+    n_positions = len(positions)
+    total_exposure = sum(s.entry_price * s.quantity for s in positions.values())
+    pct_deployed = total_exposure / ACCOUNT_EQUITY * 100 if ACCOUNT_EQUITY else 0
+    total_risk_est = sum(
+        abs(s.entry_price - s.trailing_stop.current_stop) * s.quantity
+        for s in positions.values()
+    )
+    oldest_hold = 0
+    if positions:
+        oldest_hold = max((datetime.date.today() - s.entry_date).days for s in positions.values())
+
+    position_cards = dbc.Row([
+        _stat_card("Open Positions", str(n_positions), GREEN if n_positions > 0 else MUTED),
+        _stat_card("Total Exposure", f"${total_exposure:,.0f}", ACCENT),
+        _stat_card("% Deployed", f"{pct_deployed:.1f}%",
+                   GREEN if pct_deployed <= config.MAX_CAPITAL_DEPLOYED_PCT * 100 else RED),
+        _stat_card("Est. $ at Risk", f"${total_risk_est:,.0f}", RED if total_risk_est > 0 else MUTED),
+        _stat_card("Cash Available", f"${max(ACCOUNT_EQUITY - total_exposure, 0):,.0f}", TEXT),
+        _stat_card("Oldest Hold", f"{oldest_hold}d" if n_positions else "—",
+                   YELLOW if oldest_hold > config.TIME_STOP_DAYS * 0.7 else TEXT),
+        _stat_card("Budget", f"${ACCOUNT_EQUITY:,.0f}", ACCENT),
+    ], className="mb-3")
+
+    # ── 3. Portfolio heat gauge (exposure donut) ──────────────────────────────
+    gauge_fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=pct_deployed,
+        title={"text": "Portfolio Utilisation %", "font": {"color": TEXT, "size": 14}},
+        number={"suffix": "%", "font": {"color": TEXT, "size": 28}},
+        gauge={
+            "axis": {"range": [0, 100], "tickcolor": MUTED, "tickfont": {"color": MUTED}},
+            "bar": {"color": GREEN if pct_deployed <= 60 else YELLOW if pct_deployed <= 80 else RED},
+            "bgcolor": CARD_BG,
+            "bordercolor": BORDER,
+            "steps": [
+                {"range": [0, 60],  "color": "#1a2332"},
+                {"range": [60, 80], "color": "#2a2a1a"},
+                {"range": [80, 100],"color": "#2a1a1a"},
+            ],
+            "threshold": {
+                "line": {"color": YELLOW, "width": 3},
+                "thickness": 0.8,
+                "value": config.MAX_CAPITAL_DEPLOYED_PCT * 100,
+            },
+        },
+    ))
+    gauge_fig.update_layout(
+        paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+        font={"color": TEXT},
+        margin=dict(t=50, b=20, l=30, r=30),
+        height=220,
+    )
+
+    # Position-level exposure mini bar (if positions exist)
+    if positions:
+        pos_syms = list(positions.keys())
+        pos_exposures = [positions[s].entry_price * positions[s].quantity for s in pos_syms]
+        pos_pcts = [e / ACCOUNT_EQUITY * 100 for e in pos_exposures]
+        pos_stops = [positions[s].trailing_stop.stage_label for s in pos_syms]
+
+        pos_bar = go.Figure(go.Bar(
+            x=pos_syms, y=pos_pcts,
+            marker_color=[GREEN if p <= config.MAX_POSITION_PCT * 100 else RED for p in pos_pcts],
+            text=[f"{p:.1f}%" for p in pos_pcts],
+            textposition="outside",
+            hovertemplate="%{x}: %{y:.1f}% of budget<extra></extra>",
+        ))
+        pos_bar.add_hline(
+            y=config.MAX_POSITION_PCT * 100, line_dash="dash", line_color=YELLOW,
+            annotation_text=f"Max {config.MAX_POSITION_PCT:.0%}", annotation_font_color=YELLOW,
+        )
+        pos_bar.update_layout(
+            title="Position Exposure (% of Budget)",
+            paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+            font=dict(color=TEXT),
+            xaxis=dict(color=TEXT, gridcolor=BORDER),
+            yaxis=dict(color=TEXT, gridcolor=BORDER, title="% of Budget"),
+            margin=dict(t=40, b=20, l=20, r=20),
+            height=250,
+        )
+        exposure_chart = dbc.Col(_card(dcc.Graph(figure=pos_bar, config={"displayModeBar": False})), width=8)
+    else:
+        exposure_chart = dbc.Col(_card(
+            html.Div("No open positions — exposure charts will appear once trades are placed.",
+                     style={"color": MUTED, "fontFamily": "monospace", "padding": "40px 0", "textAlign": "center"})
+        ), width=8)
+
+    # ── 4. Config summary card ────────────────────────────────────────────────
+    config_card = _card([
+        html.H6("⚙️ Config Summary", style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "12px"}),
+        dbc.Row([
+            dbc.Col([
+                html.Div("Risk Management", style={"color": ACCENT, "fontFamily": "monospace", "fontWeight": "bold", "fontSize": "13px", "marginBottom": "4px"}),
+                html.Div(f"Risk/trade:      {config.RISK_PER_TRADE_PCT:.1%} = ${ACCOUNT_EQUITY * config.RISK_PER_TRADE_PCT:,.0f}",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+                html.Div(f"Max position:    {config.MAX_POSITION_PCT:.0%} = ${ACCOUNT_EQUITY * config.MAX_POSITION_PCT:,.0f}",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+                html.Div(f"Max deployed:    {config.MAX_CAPITAL_DEPLOYED_PCT:.0%} = ${ACCOUNT_EQUITY * config.MAX_CAPITAL_DEPLOYED_PCT:,.0f}",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+                html.Div(f"Max positions:   {config.MAX_POSITIONS}",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+                html.Div(f"Max portfolio $: ${ACCOUNT_EQUITY * config.RISK_PER_TRADE_PCT * config.MAX_POSITIONS:,.0f} at risk",
+                         style={"fontFamily": "monospace", "fontSize": "12px", "color": RED}),
+            ], width=3),
+            dbc.Col([
+                html.Div("Stop & Target", style={"color": ACCENT, "fontFamily": "monospace", "fontWeight": "bold", "fontSize": "13px", "marginBottom": "4px"}),
+                html.Div(f"ATR stop mult:   {config.ATR_STOP_MULTIPLIER}×",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+                html.Div(f"ATR target mult: {config.ATR_TARGET_MULTIPLIER}×",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+                html.Div(f"Stop clamp:      {config.ATR_MIN_STOP_PCT:.0%}–{config.ATR_MAX_STOP_PCT:.0%}",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+                html.Div(f"Time stop:       {config.TIME_STOP_DAYS}d",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+                html.Div(f"Trailing stages: 3-stage adaptive",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+            ], width=3),
+            dbc.Col([
+                html.Div("Sizing", style={"color": ACCENT, "fontFamily": "monospace", "fontWeight": "bold", "fontSize": "13px", "marginBottom": "4px"}),
+                html.Div(f"Kelly fraction:  {config.KELLY_FRACTION}×{'  ✅' if config.KELLY_FRACTION > 0 else '  ❌'}",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+                html.Div(f"Kelly win rate:  {config.KELLY_WIN_RATE:.0%}",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+                html.Div(f"Vol scale HIGH:  {config.VOL_SCALE_HIGH:.2f}×",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+                html.Div(f"Vol scale LOW:   {config.VOL_SCALE_LOW:.2f}×",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+                html.Div(f"Sector penalty:  {config.CORRELATION_SAME_SECTOR_SCALE:.0%}",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+            ], width=3),
+            dbc.Col([
+                html.Div("Scaled Entry", style={"color": ACCENT, "fontFamily": "monospace", "fontWeight": "bold", "fontSize": "13px", "marginBottom": "4px"}),
+                html.Div(f"Tranches:    {config.SCALED_ENTRY_N_TRANCHES}  ({', '.join(f'{f:.0%}' for f in config.SCALED_ENTRY_FRACTIONS)})",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+                html.Div(f"ATR offsets: {', '.join(f'{o:.1f}×' for o in config.SCALED_ENTRY_ATR_OFFSETS)}",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+                html.Div(f"RSI abort:   > {config.SCALED_ENTRY_RSI_ABORT_LEVEL:.0f}",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+                html.Div(f"Expiry:      {config.SCALED_ENTRY_EXPIRY_DAYS}d",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+                html.Div(f"Partial 1:   {config.PARTIAL_EXIT_1_FRACTION:.0%} @ +{config.PARTIAL_EXIT_1_TRIGGER_ATR:.0f}×ATR",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+                html.Div(f"Partial 2:   {config.PARTIAL_EXIT_2_FRACTION:.0%} @ +{config.PARTIAL_EXIT_2_TRIGGER_ATR:.0f}×ATR",
+                         style={"fontFamily": "monospace", "fontSize": "12px"}),
+            ], width=3),
+        ]),
+    ])
+
+    # ── Recent activity summary ────────────────────────────────────────────
+    # Last screener run (check for newest screen_*.txt in results/)
+    last_screen = "—"
+    try:
+        screen_files = sorted(
+            [f for f in os.listdir(RESULTS_DIR) if f.startswith("screen_") and f.endswith(".txt")],
+            reverse=True,
+        )
+        if screen_files:
+            last_screen = screen_files[0].replace("screen_", "").replace(".txt", "")
+    except Exception:
+        pass
+
+    # Last backtest run
+    last_backtest = "—"
+    try:
+        if os.path.exists(BACKTEST_CSV):
+            bt_df = pd.read_csv(BACKTEST_CSV)
+            if "backtest_date" in bt_df.columns:
+                last_backtest = bt_df["backtest_date"].max()
+    except Exception:
+        pass
+
+    # Trade journal stats
+    trades_df = _load_trades()
+    n_trades = len(trades_df)
+    total_pnl = trades_df["realized_pnl"].dropna().sum() if not trades_df.empty else 0
+    last_trade = trades_df["date"].iloc[-1] if not trades_df.empty else "—"
+
+    # Screen log latest entry count
+    n_screen_log = 0
+    last_screen_log_date = "—"
+    try:
+        if os.path.exists(SCREEN_CSV):
+            sl_df = pd.read_csv(SCREEN_CSV, on_bad_lines="skip")
+            n_screen_log = len(sl_df)
+            if "date" in sl_df.columns and not sl_df.empty:
+                last_screen_log_date = sl_df["date"].iloc[-1]
+    except Exception:
+        pass
+
+    activity_card = _card([
+        html.H6("📋 Recent Activity", style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "12px"}),
+        dbc.Row([
+            dbc.Col([
+                html.Div(f"Last screener run:    {last_screen}",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"Last backtest run:    {last_backtest}",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"Screen log entries:   {n_screen_log}  (latest: {last_screen_log_date})",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+            ], width=6),
+            dbc.Col([
+                html.Div(f"Trade journal:   {n_trades} entries  (last: {last_trade})",
+                         style={"fontFamily": "monospace", "fontSize": "13px"}),
+                html.Div(f"Realized P&L:    ${total_pnl:+,.2f}",
+                         style={"fontFamily": "monospace", "fontSize": "13px",
+                                "color": GREEN if total_pnl >= 0 else RED}),
+                html.Div(f"Positions file:  {os.path.basename(os.path.join(RESULTS_DIR, 'positions.json'))}  ({n_positions} tracked)",
+                         style={"fontFamily": "monospace", "fontSize": "13px", "color": MUTED}),
+            ], width=6),
+        ]),
+    ])
+
+    # ── 6. Watchlist grid ─────────────────────────────────────────────────────
+    wl_rows = []
+    for i, sym in enumerate(WATCHLIST):
+        is_tracked = sym in positions
+        hold_days = (datetime.date.today() - positions[sym].entry_date).days if is_tracked else None
+        wl_rows.append({
+            "#":       i + 1,
+            "Symbol":  sym,
+            "Status":  "🟢 OPEN" if is_tracked else "⚪ Watching",
+            "Qty":     positions[sym].quantity if is_tracked else "—",
+            "Entry $": round(positions[sym].entry_price, 2) if is_tracked else "—",
+            "Stop $":  round(positions[sym].trailing_stop.current_stop, 2) if is_tracked else "—",
+            "Trail":   positions[sym].trailing_stop.stage_label if is_tracked else "—",
+            "Hold":    f"{hold_days}d" if hold_days is not None else "—",
+        })
+
+    wl_df = pd.DataFrame(wl_rows)
+    wl_colours = [
+        {"if": {"filter_query": '{Status} = "🟢 OPEN"',    "column_id": "Status"}, "color": GREEN, "fontWeight": "bold"},
+        {"if": {"filter_query": '{Status} = "⚪ Watching"', "column_id": "Status"}, "color": MUTED},
+        {"if": {"filter_query": '{Trail} = "BREAKEVEN"',    "column_id": "Trail"},  "color": YELLOW},
+        {"if": {"filter_query": '{Trail} = "PROFIT_LOCK"',  "column_id": "Trail"},  "color": GREEN},
+        {"if": {"filter_query": '{Trail} = "TIGHT_TRAIL"',  "column_id": "Trail"},  "color": GREEN, "fontWeight": "bold"},
+    ]
+
+    watchlist_card = _card([
+        html.H6(f"📋 Watchlist  ({len(WATCHLIST)} tickers)", style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+        html.Div("All tracked tickers and their current state.  🟢 = open position, ⚪ = watching for dip.",
+                 style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"}),
+        dash_table.DataTable(
+            id="overview-watchlist-table",
+            columns=[{"name": c, "id": c} for c in wl_df.columns],
+            data=wl_df.to_dict("records"),
+            style_cell=_CELL_STYLE,
+            style_header=_HDR_STYLE,
+            style_data_conditional=wl_colours,
+            style_table={"overflowX": "auto", "borderRadius": "6px"},
+            sort_action="native",
+            page_size=50,
+        ),
+    ])
+
+    # ── Assemble the tab ──────────────────────────────────────────────────────
+    return html.Div([
+        status_card,
+        position_cards,
+        dbc.Row([
+            dbc.Col(_card(dcc.Graph(figure=gauge_fig, config={"displayModeBar": False})), width=4),
+            exposure_chart,
+        ], className="mb-3"),
+        config_card,
+        activity_card,
+        watchlist_card,
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -1260,6 +2253,8 @@ def render_tab(active_tab, store_data, trades_store):
         return _log_layout()
     if active_tab == "tab-trades":
         return _trades_layout()
+    if active_tab == "tab-overview":
+        return _overview_layout()
     return html.Div("Unknown tab")
 
 
@@ -1404,6 +2399,7 @@ def refresh_screener(n_clicks):
     Input("save-trade-btn",     "n_clicks"),
     State("trade-date",         "value"),
     State("trade-symbol",       "value"),
+    State("trade-asset-type",   "value"),
     State("trade-action",       "value"),
     State("trade-qty",          "value"),
     State("trade-entry",        "value"),
@@ -1411,7 +2407,7 @@ def refresh_screener(n_clicks):
     State("trade-notes",        "value"),
     prevent_initial_call=True,
 )
-def save_trade(n_clicks, date, symbol, action, qty, entry, exit_p, notes):
+def save_trade(n_clicks, date, symbol, asset_type, action, qty, entry, exit_p, notes):
     """Validate inputs, auto-calculate P&L, append to CSV, refresh display."""
     errors = []
     if not symbol or not str(symbol).strip():
@@ -1430,6 +2426,7 @@ def save_trade(n_clicks, date, symbol, action, qty, entry, exit_p, notes):
     qty_f    = float(qty)
     entry_f  = float(entry)
     exit_f   = float(exit_p) if exit_p else None
+    sym_upper = str(symbol).strip().upper()
 
     # Auto-compute realized P&L for SELL trades if exit is provided
     realized = None
@@ -1437,9 +2434,12 @@ def save_trade(n_clicks, date, symbol, action, qty, entry, exit_p, notes):
         realized = (exit_f - entry_f) * qty_f
     amount_invested = round(qty_f * entry_f, 2)
 
+    # Resolve asset type (form dropdown → auto-detect fallback)
+    resolved_type = _infer_asset_type(sym_upper, asset_type)
+
     row = {
         "date":            date or datetime.date.today().isoformat(),
-        "symbol":          str(symbol).strip().upper(),
+        "symbol":          sym_upper,
         "action":          action or "BUY",
         "quantity":        qty_f,
         "entry_price":     entry_f,
@@ -1447,12 +2447,14 @@ def save_trade(n_clicks, date, symbol, action, qty, entry, exit_p, notes):
         "amount_invested": amount_invested,
         "realized_pnl":    round(realized, 2) if realized is not None else "",
         "notes":           (notes or "").strip(),
+        "asset_type":      resolved_type,
     }
     _append_trade(row)
 
+    type_label = "📦 ETF" if resolved_type == "ETF" else "📈 Stock"
     pnl_msg = f"  →  P&L: ${realized:+,.2f}" if realized is not None else ""
     status_msg = html.Span(
-        f"✅ Saved {row['action']} {qty_f:.0f}x {row['symbol']} @ ${entry_f:.2f}{pnl_msg}",
+        f"✅ Saved {row['action']} {qty_f:.0f}x {sym_upper} ({type_label}) @ ${entry_f:.2f}{pnl_msg}",
         style={"color": GREEN},
     )
     # Return a timestamp as store data to trigger re-render of trades tab
