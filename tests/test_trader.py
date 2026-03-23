@@ -355,3 +355,148 @@ class TestEvaluateSymbol:
         assert fund is not None
         assert not fund.passes
         assert dip is None  # should skip dip detection when fund fails
+
+
+# ---------------------------------------------------------------------------
+# run_manage_only (lightweight position management)
+# ---------------------------------------------------------------------------
+
+class TestRunManageOnly:
+    """Test the new run_manage_only function."""
+
+    def test_no_positions_returns_empty(self, monkeypatch, tmp_path):
+        import trader
+        monkeypatch.setattr(trader, "_STATE_FILE", str(tmp_path / "state.json"))
+        trader._open_positions.clear()
+
+        result = trader.run_manage_only(dry_run=True)
+        assert result["trailing_updates"] == []
+        assert result["partial_exits"] == []
+        assert result["time_stops"] == []
+        assert result["full_exits"] == []
+
+    def test_dry_run_does_not_connect_broker(self, monkeypatch, tmp_path):
+        import trader
+        monkeypatch.setattr(trader, "_STATE_FILE", str(tmp_path / "state.json"))
+
+        # Register a position
+        trader.register_position("TSLA", 200.0, 20, 5.0, 190.0)
+
+        # Mock _fetch_history to return None (no price data → safe skip)
+        monkeypatch.setattr(trader, "_fetch_history", lambda sym, period_years=1: None)
+
+        # Should not raise even though IBKR is not running
+        result = trader.run_manage_only(dry_run=True)
+        assert isinstance(result, dict)
+        assert "trailing_updates" in result
+
+        # Cleanup
+        trader.unregister_position("TSLA")
+
+    def test_live_mode_falls_back_on_ibkr_failure(self, monkeypatch, tmp_path):
+        import trader
+        monkeypatch.setattr(trader, "_STATE_FILE", str(tmp_path / "state.json"))
+
+        trader.register_position("FAIL", 100.0, 10, 2.0, 96.0)
+        monkeypatch.setattr(trader, "_fetch_history", lambda sym, period_years=1: None)
+
+        # Mock IBKRBroker to raise on connect
+        class FakeBroker:
+            def __enter__(self):
+                raise ConnectionError("TWS not running")
+            def __exit__(self, *a):
+                pass
+        monkeypatch.setattr(trader, "IBKRBroker", FakeBroker)
+
+        # Should not crash — falls back to dry-run mode
+        result = trader.run_manage_only(dry_run=False)
+        assert isinstance(result, dict)
+
+        # Cleanup
+        trader.unregister_position("FAIL")
+
+
+# ---------------------------------------------------------------------------
+# run.py scheduling helpers
+# ---------------------------------------------------------------------------
+
+class TestSchedulingHelpers:
+    """Test market-hours and buy-scan-time logic from run.py."""
+
+    def test_parse_time(self):
+        from run import _parse_time
+        t = _parse_time("09:45")
+        assert t.hour == 9
+        assert t.minute == 45
+
+    def test_sleep_label_minutes(self):
+        from run import _sleep_label
+        assert _sleep_label(90) == "1m30s"
+        assert _sleep_label(3600) == "1h00m"
+        assert _sleep_label(5400) == "1h30m"
+
+    def test_is_buy_scan_time_detects_window(self, monkeypatch):
+        from run import _is_buy_scan_time
+        import run
+
+        # Fake _now_et to return 09:45 ET on a Monday
+        class FakeNow:
+            hour = 9
+            minute = 45
+            def weekday(self): return 0
+            def time(self): return datetime.time(9, 45)
+            def date(self): return datetime.date(2026, 3, 23)
+            def strftime(self, fmt): return "09:45"
+
+        monkeypatch.setattr(run, "_now_et", lambda: FakeNow())
+        assert _is_buy_scan_time() is True
+
+    def test_is_buy_scan_time_rejects_off_time(self, monkeypatch):
+        from run import _is_buy_scan_time
+        import run
+
+        class FakeNow:
+            hour = 10
+            minute = 30
+            def weekday(self): return 0
+            def time(self): return datetime.time(10, 30)
+            def date(self): return datetime.date(2026, 3, 23)
+            def strftime(self, fmt): return "10:30"
+
+        monkeypatch.setattr(run, "_now_et", lambda: FakeNow())
+        assert _is_buy_scan_time() is False
+
+    def test_is_market_hours_weekend(self, monkeypatch):
+        import run
+
+        class FakeSat:
+            def weekday(self): return 5
+            def time(self): return datetime.time(10, 0)
+            def date(self): return datetime.date(2026, 3, 21)
+
+        monkeypatch.setattr(run, "_now_et", lambda: FakeSat())
+        assert run._is_market_hours() is False
+
+    def test_is_market_hours_weekday_open(self, monkeypatch):
+        import run
+
+        class FakeMon:
+            def weekday(self): return 0
+            def time(self): return datetime.time(10, 0)
+            def date(self): return datetime.date(2026, 3, 23)
+
+        monkeypatch.setattr(run, "_now_et", lambda: FakeMon())
+        monkeypatch.setattr(run, "_get_holidays", lambda: set())
+        assert run._is_market_hours() is True
+
+    def test_is_market_hours_before_open(self, monkeypatch):
+        import run
+
+        class FakeEarly:
+            def weekday(self): return 1
+            def time(self): return datetime.time(8, 0)
+            def date(self): return datetime.date(2026, 3, 24)
+
+        monkeypatch.setattr(run, "_now_et", lambda: FakeEarly())
+        monkeypatch.setattr(run, "_get_holidays", lambda: set())
+        assert run._is_market_hours() is False

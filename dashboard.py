@@ -80,15 +80,20 @@ SCREEN_CSV      = os.path.join(RESULTS_DIR, "screen_log.csv")
 BACKTEST_CSV    = os.path.join(RESULTS_DIR, "backtest_trades.csv")
 TRADES_CSV      = os.path.join(RESULTS_DIR, "my_trades.csv")   # manual journal
 
-BRAND_BG    = "#0d1117"
-CARD_BG     = "#161b22"
-ACCENT      = "#58a6ff"
-GREEN       = "#3fb950"
-RED         = "#f85149"
-YELLOW      = "#d29922"
-TEXT        = "#e6edf3"
-MUTED       = "#8b949e"
-BORDER      = "#30363d"
+# ── Light Monochrome + Red theme ────────────────────────────────────────────
+# Warm light background, soft white cards, charcoal text. Red is the ONE accent
+# colour — reserved for danger, losses, and critical items.  Everything else
+# is understated greys so the red pops.
+BRAND_BG    = "#f0eeeb"      # warm off-white page background
+CARD_BG     = "#ffffff"      # pure white cards
+ACCENT      = "#2b2b2b"      # near-black for headers & labels (high contrast)
+GREEN       = "#5a5a5a"      # dark grey for "good" / profit (understated)
+RED         = "#c41e1e"      # the ONE colour — danger, loss, critical
+YELLOW      = "#8c8c8c"      # medium grey for caution / warnings
+TEXT        = "#333333"      # charcoal body text
+MUTED       = "#999999"      # light grey for secondary / disabled
+BORDER      = "#ddd8d0"      # warm light border
+ORANGE      = "#7a7a7a"      # neutral grey replacing old orange
 
 _CELL_STYLE = {
     "backgroundColor": CARD_BG,
@@ -98,7 +103,7 @@ _CELL_STYLE = {
     "fontSize": "13px",
 }
 _HDR_STYLE = {
-    "backgroundColor": "#21262d",
+    "backgroundColor": "#f5f3f0",
     "color": ACCENT,
     "fontWeight": "bold",
     "fontFamily": "monospace",
@@ -661,7 +666,7 @@ def _make_table(df: pd.DataFrame, tid: str, hide_cols: list[str] | None = None,
         style_data_conditional += [
             {"if": {"filter_query": '{Signal} contains "BUY"',  "column_id": "Signal"}, "color": GREEN,  "fontWeight": "bold"},
             {"if": {"filter_query": '{Signal} contains "DIP+FUND"', "column_id": "Signal"}, "color": YELLOW},
-            {"if": {"filter_query": '{Signal} contains "DIP ONLY"', "column_id": "Signal"}, "color": "#f0883e"},
+            {"if": {"filter_query": '{Signal} contains "DIP ONLY"', "column_id": "Signal"}, "color": ORANGE},
             {"if": {"filter_query": '{Signal} contains "WATCH"', "column_id": "Signal"}, "color": MUTED},
         ]
     if "outcome" in display_df.columns or "Outcome" in display_df.columns:
@@ -714,7 +719,7 @@ def _make_table(df: pd.DataFrame, tid: str, hide_cols: list[str] | None = None,
 
 app = dash.Dash(
     __name__,
-    external_stylesheets=[dbc.themes.CYBORG],
+    external_stylesheets=[dbc.themes.FLATLY],
     title="Buy The Sauce — Dashboard",
 )
 app.layout = html.Div(
@@ -732,7 +737,7 @@ app.layout = html.Div(
                 html.Span(id="last-refresh-label",
                           style={"color": MUTED, "fontSize": "12px", "fontFamily": "monospace", "marginLeft": "auto"}),
             ], fluid=True),
-            color=CARD_BG, dark=True,
+            color=CARD_BG, dark=False,
             style={"borderBottom": f"1px solid {BORDER}", "padding": "8px 24px"},
         ),
 
@@ -830,7 +835,16 @@ def _screener_layout():
 # ---------------------------------------------------------------------------
 
 def _build_live_positions_card():
-    """Build a dashboard card showing tracked live positions and their sell-side state."""
+    """Build dashboard cards showing tracked live positions and their sell-side state.
+
+    Returns a Div with:
+      1. Summary stat cards (positions, exposure, risk, stages)
+      2. Per-position price ladder chart (entry → stop → partials → target)
+      3. Trailing stop stage distribution donut
+      4. Time-to-expiry / holding-period timeline bars
+      5. Unrealized P&L waterfall with risk/reward zones
+      6. Detailed positions table
+    """
     try:
         from trader import get_open_positions_snapshot
         positions = get_open_positions_snapshot()
@@ -845,33 +859,635 @@ def _build_live_positions_card():
                      style={"color": MUTED, "fontFamily": "monospace", "fontSize": "12px"}),
         ])
 
+    # ── Fetch current prices for all tracked symbols ─────────────────────────
+    tracked_symbols = list(positions.keys())
+    current_prices = _fetch_current_prices(tracked_symbols)
+
+    # ── Build enriched row data for the table + charts ───────────────────────
     rows = []
+    chart_data = []  # for price ladder chart
     for sym, state in positions.items():
         holding_days = (datetime.date.today() - state.entry_date).days
-        time_left = max(0, config.TIME_STOP_DAYS - holding_days) if config.TIME_STOP_ENABLED else "—"
+        time_left = max(0, config.TIME_STOP_DAYS - holding_days) if config.TIME_STOP_ENABLED else None
+        cur_price = current_prices.get(sym)
+        entry = state.entry_price
+        atr = state.atr_14_abs
+        stop = state.trailing_stop.current_stop
+        high = state.trailing_stop.highest_price
+
+        # Compute key price levels
+        partial_1_price = round(entry + config.PARTIAL_EXIT_1_TRIGGER_ATR * atr, 2)
+        partial_2_price = round(entry + config.PARTIAL_EXIT_2_TRIGGER_ATR * atr, 2)
+        target_price = round(entry + config.ATR_TARGET_MULTIPLIER * atr, 2)
+
+        # Unrealized P&L
+        unreal_dollar = round((cur_price - entry) * state.quantity, 2) if cur_price else None
+        unreal_pct = round((cur_price / entry - 1) * 100, 1) if cur_price and entry > 0 else None
+        gain_in_atr = round((cur_price - entry) / atr, 2) if cur_price and atr > 0 else None
+
+        # Risk & reward amounts (at current qty)
+        risk_at_stop = round((entry - stop) * state.quantity, 2)
+        gain_at_p1 = round((partial_1_price - entry) * state.quantity, 2)
+        gain_at_p2 = round((partial_2_price - entry) * state.quantity, 2)
+        gain_at_target = round((target_price - entry) * state.quantity, 2)
+
         rows.append({
             "Symbol":        sym,
             "Qty":           state.quantity,
-            "Entry $":       round(state.entry_price, 2),
+            "Entry $":       round(entry, 2),
+            "Current $":     round(cur_price, 2) if cur_price else "n/a",
+            "P&L $":         f"{unreal_dollar:+,.2f}" if unreal_dollar is not None else "n/a",
+            "P&L %":         f"{unreal_pct:+.1f}%" if unreal_pct is not None else "n/a",
+            "Gain ×ATR":     f"{gain_in_atr:+.1f}" if gain_in_atr is not None else "n/a",
             "Entry Date":    str(state.entry_date),
             "Hold Days":     holding_days,
-            "Time Left":     time_left,
-            "ATR $":         round(state.atr_14_abs, 2),
+            "Time Left":     f"{time_left}d" if time_left is not None else "—",
+            "ATR $":         round(atr, 2),
             "Trail Stage":   state.trailing_stop.stage_label,
-            "Stop $":        round(state.trailing_stop.current_stop, 2),
-            "High $":        round(state.trailing_stop.highest_price, 2),
+            "Stop $":        round(stop, 2),
+            "P1 $":          partial_1_price,
+            "P2 $":          partial_2_price,
+            "Target $":      target_price,
+            "High $":        round(high, 2),
             "Partials":      ", ".join(str(x) for x in sorted(state.partial_exits_taken)) or "none",
             "Updates":       state.trailing_stop.n_updates,
         })
 
-    pos_df = pd.DataFrame(rows)
+        chart_data.append({
+            "sym": sym, "entry": entry, "stop": stop, "current": cur_price,
+            "high": high, "partial_1": partial_1_price, "partial_2": partial_2_price,
+            "target": target_price, "atr": atr, "qty": state.quantity,
+            "holding_days": holding_days, "time_left": time_left,
+            "stage": state.trailing_stop.stage_label,
+            "unreal_dollar": unreal_dollar, "unreal_pct": unreal_pct,
+            "gain_in_atr": gain_in_atr,
+            "risk_at_stop": risk_at_stop,
+            "gain_at_p1": gain_at_p1, "gain_at_p2": gain_at_p2,
+            "gain_at_target": gain_at_target,
+            "partials_taken": state.partial_exits_taken,
+        })
 
-    # Colour-code trailing stop stages
+    pos_df = pd.DataFrame(rows)
+    n_pos = len(positions)
+
+    # ── Stat cards ────────────────────────────────────────────────────────────
+    total_exposure = sum(s.entry_price * s.quantity for s in positions.values())
+    total_risk_at_stop = sum(d["risk_at_stop"] for d in chart_data)
+    total_unreal = sum(d["unreal_dollar"] for d in chart_data if d["unreal_dollar"] is not None)
+    avg_hold = sum(d["holding_days"] for d in chart_data) / n_pos if n_pos else 0
+    n_profitable = sum(1 for d in chart_data if d["unreal_dollar"] is not None and d["unreal_dollar"] > 0)
+    stage_counts = {}
+    for d in chart_data:
+        stage_counts[d["stage"]] = stage_counts.get(d["stage"], 0) + 1
+
+    live_stat_cards = dbc.Row([
+        _stat_card("Tracked Positions",  str(n_pos),                          ACCENT),
+        _stat_card("Total Exposure",     f"${total_exposure:,.0f}",           TEXT),
+        _stat_card("Unrealized P&L",     f"${total_unreal:+,.2f}",
+                   GREEN if total_unreal >= 0 else RED),
+        _stat_card("$ at Risk (stop)",   f"${total_risk_at_stop:,.0f}",       RED),
+        _stat_card("Avg Hold",           f"{avg_hold:.0f}d / {config.TIME_STOP_DAYS}d", TEXT),
+        _stat_card("Profitable",         f"{n_profitable}/{n_pos}",
+                   GREEN if n_profitable > n_pos / 2 else YELLOW),
+    ], className="mb-3")
+
+    # ── Chart 1: Per-position price ladder (bullet / range chart) ────────────
+    # Shows stop → entry → partial1 → partial2 → target as horizontal ranges
+    # with a marker for the current price
+    ladder_fig = go.Figure()
+    syms = [d["sym"] for d in chart_data]
+
+    # Risk zone: stop → entry (red shading)
+    ladder_fig.add_trace(go.Bar(
+        y=syms,
+        x=[d["entry"] - d["stop"] for d in chart_data],
+        base=[d["stop"] for d in chart_data],
+        orientation="h",
+        name="🔴 Risk (stop → entry)",
+        marker_color="rgba(196,30,30,0.20)",
+        hovertemplate="%{y}: Stop $%{base:.2f} → Entry $%{x:.2f}<extra>Risk zone</extra>",
+    ))
+    # Zone: entry → partial 1
+    ladder_fig.add_trace(go.Bar(
+        y=syms,
+        x=[d["partial_1"] - d["entry"] for d in chart_data],
+        base=[d["entry"] for d in chart_data],
+        orientation="h",
+        name=f"� → P1 (+{config.PARTIAL_EXIT_1_TRIGGER_ATR:.0f}×ATR)",
+        marker_color="rgba(160,155,148,0.30)",
+        hovertemplate="%{y}: Entry → Partial 1 $%{x:.2f}<extra></extra>",
+    ))
+    # Zone: partial 1 → partial 2
+    ladder_fig.add_trace(go.Bar(
+        y=syms,
+        x=[d["partial_2"] - d["partial_1"] for d in chart_data],
+        base=[d["partial_1"] for d in chart_data],
+        orientation="h",
+        name=f"⚪ → P2 (+{config.PARTIAL_EXIT_2_TRIGGER_ATR:.0f}×ATR)",
+        marker_color="rgba(130,125,118,0.25)",
+        hovertemplate="%{y}: Partial 1 → Partial 2 $%{x:.2f}<extra></extra>",
+    ))
+    # Zone: partial 2 → target
+    ladder_fig.add_trace(go.Bar(
+        y=syms,
+        x=[d["target"] - d["partial_2"] for d in chart_data],
+        base=[d["partial_2"] for d in chart_data],
+        orientation="h",
+        name=f"◻ → Target (+{config.ATR_TARGET_MULTIPLIER:.0f}×ATR)",
+        marker_color="rgba(100,95,88,0.20)",
+        hovertemplate="%{y}: Partial 2 → Target $%{x:.2f}<extra></extra>",
+    ))
+
+    # Current price markers
+    cur_prices_list = [d["current"] for d in chart_data]
+    cur_colours = []
+    for d in chart_data:
+        if d["current"] is None:
+            cur_colours.append(MUTED)
+        elif d["current"] >= d["partial_2"]:
+            cur_colours.append(GREEN)
+        elif d["current"] >= d["entry"]:
+            cur_colours.append(YELLOW)
+        else:
+            cur_colours.append(RED)
+
+    ladder_fig.add_trace(go.Scatter(
+        y=syms,
+        x=[p if p is not None else 0 for p in cur_prices_list],
+        mode="markers+text",
+        marker=dict(symbol="diamond", size=14, color=cur_colours,
+                    line=dict(color=TEXT, width=1.5)),
+        text=[f"${p:.2f}" if p else "n/a" for p in cur_prices_list],
+        textposition="top center",
+        textfont=dict(color=TEXT, size=10),
+        name="◆ Current Price",
+        hovertemplate="%{y}: $%{x:.2f}<extra>Current</extra>",
+    ))
+
+    # Trailing stop markers (distinct from risk zone)
+    ladder_fig.add_trace(go.Scatter(
+        y=syms,
+        x=[d["stop"] for d in chart_data],
+        mode="markers",
+        marker=dict(symbol="triangle-left", size=10, color=RED,
+                    line=dict(color=RED, width=1)),
+        name="◀ Trailing Stop",
+        hovertemplate="%{y}: Stop $%{x:.2f}<extra>Trail stop</extra>",
+    ))
+
+    ladder_fig.update_layout(
+        title="Per-Position Price Ladder — Sell-Side Levels",
+        barmode="stack",
+        paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+        font=dict(color=TEXT),
+        xaxis=dict(gridcolor=BORDER, color=TEXT, title="Price ($)"),
+        yaxis=dict(color=TEXT, gridcolor=BORDER),
+        margin=dict(t=40, b=20, l=20, r=20),
+        legend=dict(font=dict(color=TEXT, size=10), orientation="h",
+                    yanchor="bottom", y=1.02, xanchor="left", x=0),
+        height=max(250, 70 * n_pos),
+    )
+
+    # ── Chart 2: Trailing stop stage distribution donut ──────────────────────
+    stage_order = ["INITIAL", "BREAKEVEN", "PROFIT_LOCK", "TIGHT_TRAIL"]
+    stage_colour_map = {"INITIAL": MUTED, "BREAKEVEN": YELLOW,
+                        "PROFIT_LOCK": GREEN, "TIGHT_TRAIL": ACCENT}
+    stage_labels = [s for s in stage_order if s in stage_counts]
+    stage_values = [stage_counts[s] for s in stage_labels]
+    stage_colors = [stage_colour_map.get(s, MUTED) for s in stage_labels]
+
+    stage_fig = go.Figure(go.Pie(
+        labels=stage_labels, values=stage_values,
+        hole=0.55,
+        marker=dict(colors=stage_colors),
+        textinfo="label+value",
+        textfont=dict(color=TEXT, size=12),
+        hovertemplate="%{label}: %{value} position(s)  (%{percent})<extra></extra>",
+    ))
+    stage_fig.update_layout(
+        title="Trail Stage Distribution",
+        paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+        font=dict(color=TEXT),
+        margin=dict(t=40, b=10, l=10, r=10),
+        showlegend=False,
+        height=280,
+        annotations=[dict(text=f"{n_pos}", x=0.5, y=0.5, font_size=24,
+                          showarrow=False, font_color=ACCENT)],
+    )
+
+    # ── Chart 3: Holding period timeline (horizontal bars) ───────────────────
+    hold_syms = [d["sym"] for d in chart_data]
+    hold_days_vals = [d["holding_days"] for d in chart_data]
+    time_left_vals = [d["time_left"] if d["time_left"] is not None else 0 for d in chart_data]
+
+    hold_fig = go.Figure()
+    hold_fig.add_trace(go.Bar(
+        y=hold_syms, x=hold_days_vals,
+        orientation="h",
+        name="Days Held",
+        marker_color=[RED if hd >= config.TIME_STOP_DAYS * 0.8
+                      else YELLOW if hd >= config.TIME_STOP_DAYS * 0.5
+                      else GREEN for hd in hold_days_vals],
+        text=[f"{d}d" for d in hold_days_vals],
+        textposition="inside",
+        hovertemplate="%{y}: %{x}d held<extra></extra>",
+    ))
+    hold_fig.add_trace(go.Bar(
+        y=hold_syms, x=time_left_vals,
+        orientation="h",
+        name="Days Remaining",
+        marker_color="rgba(200,195,188,0.35)",
+        text=[f"{d}d left" if d > 0 else "⚠️" for d in time_left_vals],
+        textposition="inside",
+        textfont=dict(color=MUTED),
+        hovertemplate="%{y}: %{x}d remaining<extra></extra>",
+    ))
+    hold_fig.add_vline(x=config.TIME_STOP_DAYS, line_dash="dash", line_color=RED,
+                       annotation_text=f"Time Stop ({config.TIME_STOP_DAYS}d)",
+                       annotation_font_color=RED)
+    hold_fig.update_layout(
+        title="Holding Period vs Time Stop",
+        barmode="stack",
+        paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+        font=dict(color=TEXT),
+        xaxis=dict(gridcolor=BORDER, color=TEXT, title="Calendar Days"),
+        yaxis=dict(color=TEXT, gridcolor=BORDER),
+        margin=dict(t=40, b=20, l=20, r=20),
+        showlegend=True,
+        legend=dict(font=dict(color=TEXT, size=10)),
+        height=max(220, 50 * n_pos),
+    )
+
+    # ── Chart 4: Unrealized P&L waterfall ────────────────────────────────────
+    pnl_syms = [d["sym"] for d in chart_data]
+    pnl_vals = [d["unreal_dollar"] if d["unreal_dollar"] is not None else 0 for d in chart_data]
+
+    pnl_fig = go.Figure(go.Bar(
+        x=pnl_syms, y=pnl_vals,
+        marker_color=[GREEN if v >= 0 else RED for v in pnl_vals],
+        text=[f"${v:+,.0f}" for v in pnl_vals],
+        textposition="outside",
+        hovertemplate="%{x}: $%{y:+,.2f}<extra></extra>",
+    ))
+    pnl_fig.add_hline(y=0, line_color=BORDER, line_dash="dash")
+    pnl_fig.update_layout(
+        title="Unrealized P&L by Position",
+        paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+        font=dict(color=TEXT),
+        xaxis=dict(color=TEXT, gridcolor=BORDER),
+        yaxis=dict(color=TEXT, gridcolor=BORDER, title="P&L ($)"),
+        margin=dict(t=40, b=20, l=20, r=20),
+        height=280,
+    )
+
+    # ── Chart 5: Risk / reward breakdown per position ────────────────────────
+    # Stacked bar: negative (risk at stop) + positive (gain at P1, P2, target)
+    rr_syms = [d["sym"] for d in chart_data]
+    risk_vals = [-d["risk_at_stop"] for d in chart_data]  # negative = downside
+    p1_gain = [d["gain_at_p1"] for d in chart_data]
+    p2_incremental = [d["gain_at_p2"] - d["gain_at_p1"] for d in chart_data]
+    tgt_incremental = [d["gain_at_target"] - d["gain_at_p2"] for d in chart_data]
+
+    rr_fig = go.Figure()
+    rr_fig.add_trace(go.Bar(
+        x=rr_syms, y=risk_vals,
+        name="⬇ Risk @ Stop",
+        marker_color="rgba(196,30,30,0.55)",
+        text=[f"-${abs(v):,.0f}" for v in risk_vals],
+        textposition="outside",
+        hovertemplate="%{x}: -$%{y:,.0f} at stop<extra></extra>",
+    ))
+    rr_fig.add_trace(go.Bar(
+        x=rr_syms, y=p1_gain,
+        name=f"⬆ Gain @ P1 (+{config.PARTIAL_EXIT_1_TRIGGER_ATR:.0f}×ATR)",
+        marker_color="rgba(140,135,128,0.55)",
+        hovertemplate="%{x}: +$%{y:,.0f} at P1<extra></extra>",
+    ))
+    rr_fig.add_trace(go.Bar(
+        x=rr_syms, y=p2_incremental,
+        name=f"⬆ Gain @ P2 (+{config.PARTIAL_EXIT_2_TRIGGER_ATR:.0f}×ATR)",
+        marker_color="rgba(110,105,98,0.55)",
+        hovertemplate="%{x}: +$%{y:,.0f} incremental at P2<extra></extra>",
+    ))
+    rr_fig.add_trace(go.Bar(
+        x=rr_syms, y=tgt_incremental,
+        name=f"⬆ Gain @ Target (+{config.ATR_TARGET_MULTIPLIER:.0f}×ATR)",
+        marker_color="rgba(80,76,70,0.50)",
+        hovertemplate="%{x}: +$%{y:,.0f} incremental at target<extra></extra>",
+    ))
+    rr_fig.add_hline(y=0, line_color=BORDER, line_dash="dash")
+    rr_fig.update_layout(
+        title="Risk/Reward Breakdown — $ at Each Exit Level",
+        barmode="relative",
+        paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+        font=dict(color=TEXT),
+        xaxis=dict(color=TEXT, gridcolor=BORDER),
+        yaxis=dict(color=TEXT, gridcolor=BORDER, title="$ Risk (−) / Reward (+)"),
+        margin=dict(t=40, b=20, l=20, r=20),
+        legend=dict(font=dict(color=TEXT, size=10), orientation="h",
+                    yanchor="bottom", y=1.02, xanchor="left", x=0),
+        height=300,
+    )
+
+    # ── Chart 6: ATR Efficiency Scatter (Gain ×ATR vs Holding Days) ──────────
+    # Shows which positions are converting holding time into ATR-multiple gains
+    scatter_syms = [d["sym"] for d in chart_data]
+    scatter_hold = [d["holding_days"] for d in chart_data]
+    scatter_gain_atr = [d["gain_in_atr"] if d["gain_in_atr"] is not None else 0 for d in chart_data]
+    scatter_stages = [d["stage"] for d in chart_data]
+    scatter_exposure = [d["entry"] * d["qty"] for d in chart_data]
+
+    # Marker colours by trail stage
+    _stage_scatter_colours = {
+        "INITIAL": MUTED, "BREAKEVEN": YELLOW,
+        "PROFIT_LOCK": GREEN, "TIGHT_TRAIL": ACCENT,
+    }
+    scatter_colours = [_stage_scatter_colours.get(s, MUTED) for s in scatter_stages]
+    # Marker size proportional to exposure (normalised 10–40)
+    max_exp = max(scatter_exposure) if scatter_exposure else 1
+    scatter_sizes = [max(10, min(40, int(e / max_exp * 30 + 10))) for e in scatter_exposure]
+
+    efficiency_fig = go.Figure()
+    efficiency_fig.add_trace(go.Scatter(
+        x=scatter_hold,
+        y=scatter_gain_atr,
+        mode="markers+text",
+        marker=dict(size=scatter_sizes, color=scatter_colours,
+                    line=dict(color=TEXT, width=1),
+                    opacity=0.85),
+        text=scatter_syms,
+        textposition="top center",
+        textfont=dict(color=TEXT, size=10),
+        hovertemplate=(
+            "%{text}<br>"
+            "Hold: %{x}d<br>"
+            "Gain: %{y:+.2f}×ATR<br>"
+            "<extra></extra>"
+        ),
+    ))
+    # Reference lines for trail stage triggers
+    efficiency_fig.add_hline(y=0, line_color=BORDER, line_dash="dash")
+    efficiency_fig.add_hline(y=config.TRAILING_STAGE1_TRIGGER_ATR,
+                             line_color=YELLOW, line_dash="dot",
+                             annotation_text=f"BE ({config.TRAILING_STAGE1_TRIGGER_ATR:.0f}×ATR)",
+                             annotation_font_color=YELLOW, annotation_position="top left")
+    efficiency_fig.add_hline(y=config.TRAILING_STAGE2_TRIGGER_ATR,
+                             line_color=GREEN, line_dash="dot",
+                             annotation_text=f"Lock ({config.TRAILING_STAGE2_TRIGGER_ATR:.0f}×ATR)",
+                             annotation_font_color=GREEN, annotation_position="top left")
+    efficiency_fig.add_hline(y=config.TRAILING_STAGE3_TRIGGER_ATR,
+                             line_color=ACCENT, line_dash="dot",
+                             annotation_text=f"Tight ({config.TRAILING_STAGE3_TRIGGER_ATR:.0f}×ATR)",
+                             annotation_font_color=ACCENT, annotation_position="top left")
+    # Time stop vertical line
+    efficiency_fig.add_vline(x=config.TIME_STOP_DAYS, line_color=RED, line_dash="dash",
+                             annotation_text=f"Time Stop ({config.TIME_STOP_DAYS}d)",
+                             annotation_font_color=RED)
+    efficiency_fig.update_layout(
+        title="ATR Efficiency — Gain ×ATR vs Holding Days",
+        paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+        font=dict(color=TEXT),
+        xaxis=dict(color=TEXT, gridcolor=BORDER, title="Days Held"),
+        yaxis=dict(color=TEXT, gridcolor=BORDER, title="Gain (×ATR)"),
+        margin=dict(t=40, b=20, l=20, r=20),
+        showlegend=False,
+        height=320,
+    )
+
+    # ── Chart 7: Exit Proximity Radar — how close to each trigger ────────────
+    # For each position, show % distance to next partial, target, and time stop
+    prox_categories = ["P1 Exit", "P2 Exit", "Target", "Time Stop", "Trail Stop Hit"]
+    prox_data = []  # list of dicts with sym + proximity values
+    for d in chart_data:
+        cur = d["current"]
+        if cur is None:
+            continue
+        entry = d["entry"]
+        atr = d["atr"]
+
+        # Distance to P1 (% of the way from entry to P1)
+        p1_dist = d["partial_1"] - entry
+        p1_progress = min(100, max(0, (cur - entry) / p1_dist * 100)) if p1_dist > 0 else 0
+
+        # Distance to P2 (% of the way from entry to P2)
+        p2_dist = d["partial_2"] - entry
+        p2_progress = min(100, max(0, (cur - entry) / p2_dist * 100)) if p2_dist > 0 else 0
+
+        # Distance to target
+        tgt_dist = d["target"] - entry
+        tgt_progress = min(100, max(0, (cur - entry) / tgt_dist * 100)) if tgt_dist > 0 else 0
+
+        # Time stop progress
+        time_progress = min(100, d["holding_days"] / config.TIME_STOP_DAYS * 100) if config.TIME_STOP_ENABLED else 0
+
+        # Trail stop proximity: how close is current price to the trail stop
+        # (100% = sitting on stop, 0% = far above)
+        stop = d["stop"]
+        if cur > stop and entry > stop:
+            trail_prox = max(0, min(100, (1 - (cur - stop) / (entry - stop + atr)) * 100))
+        elif cur <= stop:
+            trail_prox = 100
+        else:
+            trail_prox = 0
+
+        prox_data.append({
+            "sym": d["sym"],
+            "P1 Exit": round(p1_progress, 1),
+            "P2 Exit": round(p2_progress, 1),
+            "Target": round(tgt_progress, 1),
+            "Time Stop": round(time_progress, 1),
+            "Trail Stop Hit": round(trail_prox, 1),
+        })
+
+    if prox_data:
+        prox_fig = go.Figure()
+        for pd_item in prox_data:
+            prox_fig.add_trace(go.Scatterpolar(
+                r=[pd_item[c] for c in prox_categories],
+                theta=prox_categories,
+                fill="toself",
+                name=pd_item["sym"],
+                opacity=0.6,
+                line=dict(width=2),
+            ))
+        prox_fig.update_layout(
+            title="Exit Proximity Radar — % Progress to Each Trigger",
+            polar=dict(
+                radialaxis=dict(
+                    visible=True, range=[0, 100],
+                    gridcolor=BORDER, color=MUTED,
+                    ticksuffix="%",
+                ),
+                angularaxis=dict(gridcolor=BORDER, color=TEXT),
+                bgcolor=CARD_BG,
+            ),
+            paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+            font=dict(color=TEXT),
+            margin=dict(t=50, b=20, l=40, r=40),
+            showlegend=True,
+            legend=dict(font=dict(color=TEXT, size=10)),
+            height=380,
+        )
+    else:
+        prox_fig = go.Figure()
+        prox_fig.update_layout(
+            paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+            annotations=[dict(text="No price data", x=0.5, y=0.5,
+                              showarrow=False, font=dict(color=MUTED, size=14))],
+            height=300,
+        )
+
+    # ── Chart 8: Trailing Stop Progression — how far each stop has moved ─────
+    # Bullet-style: initial_stop → current_stop → entry → current_price
+    trail_syms = [d["sym"] for d in chart_data]
+    trail_initial = []
+    trail_current_stop = []
+    trail_max_possible = []
+    for sym, state in positions.items():
+        ts = state.trailing_stop
+        trail_initial.append(ts.initial_stop)
+        trail_current_stop.append(ts.current_stop)
+        # Max possible trail = entry + best case (stage 3 trail would move up to)
+        trail_max_possible.append(ts.highest_price - config.TRAILING_STAGE3_TRAIL_ATR * ts.atr_14_abs
+                                  if ts.highest_price > ts.entry_price else ts.entry_price)
+
+    # Stop moved: current_stop - initial_stop (positive = good, stop has tightened)
+    stop_moved = [c - i for c, i in zip(trail_current_stop, trail_initial)]
+
+    trail_fig = go.Figure()
+    trail_fig.add_trace(go.Bar(
+        y=trail_syms, x=stop_moved,
+        orientation="h",
+        name="Stop Moved $",
+        marker_color=[GREEN if m > 0 else (YELLOW if m == 0 else RED) for m in stop_moved],
+        text=[f"${m:+.2f}" for m in stop_moved],
+        textposition="outside",
+        hovertemplate="%{y}: Stop moved %{x:+$.2f}<br>Initial: $%{customdata[0]:.2f}<br>Current: $%{customdata[1]:.2f}<extra></extra>",
+        customdata=list(zip(trail_initial, trail_current_stop)),
+    ))
+    trail_fig.add_vline(x=0, line_color=BORDER, line_dash="dash")
+    trail_fig.update_layout(
+        title="Trailing Stop Progression — $ Moved from Initial",
+        paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+        font=dict(color=TEXT),
+        xaxis=dict(color=TEXT, gridcolor=BORDER, title="$ Stop Moved (+ = tightened)"),
+        yaxis=dict(color=TEXT, gridcolor=BORDER),
+        margin=dict(t=40, b=20, l=20, r=20),
+        showlegend=False,
+        height=max(220, 50 * n_pos),
+    )
+
+    # ── Chart 9: Position Health Heatmap ─────────────────────────────────────
+    # Colour-coded grid: rows = symbols, cols = health metrics
+    health_metrics = ["P&L %", "Gain ×ATR", "Hold %", "Trail Stage", "Partials Done"]
+    health_z = []   # numeric matrix for heatmap
+    health_text = []  # text annotations
+    for d in chart_data:
+        pnl_pct = d["unreal_pct"] if d["unreal_pct"] is not None else 0
+        gain_atr_val = d["gain_in_atr"] if d["gain_in_atr"] is not None else 0
+        hold_pct = d["holding_days"] / config.TIME_STOP_DAYS * 100 if config.TIME_STOP_ENABLED else 0
+        stage_num = {"INITIAL": 0, "BREAKEVEN": 1, "PROFIT_LOCK": 2, "TIGHT_TRAIL": 3}.get(d["stage"], 0)
+        partials_done = len(d["partials_taken"])
+
+        # Normalise each metric to 0–100 for colour mapping
+        # P&L%: -10% = 0, +10% = 100 (clamped)
+        pnl_norm = max(0, min(100, (pnl_pct + 10) / 20 * 100))
+        # Gain×ATR: -2 = 0, +3 = 100
+        atr_norm = max(0, min(100, (gain_atr_val + 2) / 5 * 100))
+        # Hold%: 0 = 100 (good), 100 = 0 (bad) — inverted: more time left = healthier
+        hold_norm = max(0, min(100, 100 - hold_pct))
+        # Stage: 0→25, 1→50, 2→75, 3→100
+        stage_norm = stage_num / 3 * 100
+        # Partials: 0→33, 1→66, 2→100
+        partial_norm = partials_done / 2 * 100
+
+        health_z.append([pnl_norm, atr_norm, hold_norm, stage_norm, partial_norm])
+        health_text.append([
+            f"{pnl_pct:+.1f}%",
+            f"{gain_atr_val:+.1f}×",
+            f"{d['holding_days']}d/{config.TIME_STOP_DAYS}d",
+            d["stage"],
+            f"{partials_done}/2",
+        ])
+
+    health_fig = go.Figure(go.Heatmap(
+        z=health_z,
+        x=health_metrics,
+        y=[d["sym"] for d in chart_data],
+        text=health_text,
+        texttemplate="%{text}",
+        textfont=dict(size=11, color=TEXT),
+        colorscale=[
+            [0.0, "#c41e1e"],     # RED — critical / poor
+            [0.25, "#e0b0b0"],    # faded rose — below average
+            [0.5, "#e0ddd8"],     # warm neutral — average
+            [0.75, "#c8c4bc"],    # warm grey — good
+            [1.0, "#8a8580"],     # dark warm grey — excellent
+        ],
+        showscale=False,
+        hovertemplate="%{y} — %{x}: %{text}<extra></extra>",
+    ))
+    health_fig.update_layout(
+        title="Position Health Heatmap",
+        paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+        font=dict(color=TEXT),
+        xaxis=dict(color=TEXT, gridcolor=BORDER, side="top"),
+        yaxis=dict(color=TEXT, gridcolor=BORDER, autorange="reversed"),
+        margin=dict(t=60, b=20, l=20, r=20),
+        height=max(200, 55 * n_pos + 80),
+    )
+
+    # ── Chart 10: Portfolio P&L Distribution (box + strip) ───────────────────
+    pnl_pct_vals = [d["unreal_pct"] if d["unreal_pct"] is not None else 0 for d in chart_data]
+
+    dist_fig = go.Figure()
+    dist_fig.add_trace(go.Box(
+        y=pnl_pct_vals,
+        name="P&L %",
+        marker_color=ACCENT,
+        line_color=ACCENT,
+        fillcolor="rgba(90,90,90,0.08)",
+        boxpoints="all",
+        jitter=0.4,
+        pointpos=-1.5,
+        text=[d["sym"] for d in chart_data],
+        hovertemplate="%{text}: %{y:+.1f}%<extra></extra>",
+        marker=dict(
+            color=[GREEN if v >= 0 else RED for v in pnl_pct_vals],
+            size=10,
+            line=dict(color=TEXT, width=1),
+        ),
+    ))
+    dist_fig.add_hline(y=0, line_color=BORDER, line_dash="dash")
+
+    # Add mean line
+    mean_pnl = sum(pnl_pct_vals) / len(pnl_pct_vals) if pnl_pct_vals else 0
+    dist_fig.add_hline(y=mean_pnl, line_color=YELLOW, line_dash="dot",
+                       annotation_text=f"Avg: {mean_pnl:+.1f}%",
+                       annotation_font_color=YELLOW)
+    dist_fig.update_layout(
+        title="Unrealized P&L Distribution",
+        paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+        font=dict(color=TEXT),
+        yaxis=dict(color=TEXT, gridcolor=BORDER, title="P&L %"),
+        margin=dict(t=40, b=20, l=20, r=20),
+        showlegend=False,
+        height=280,
+    )
+
+    # ── Positions table with colour-coding ───────────────────────────────────
     stage_colours = [
         {"if": {"filter_query": '{Trail Stage} = "INITIAL"',      "column_id": "Trail Stage"}, "color": MUTED},
         {"if": {"filter_query": '{Trail Stage} = "BREAKEVEN"',    "column_id": "Trail Stage"}, "color": YELLOW},
         {"if": {"filter_query": '{Trail Stage} = "PROFIT_LOCK"',  "column_id": "Trail Stage"}, "color": GREEN},
         {"if": {"filter_query": '{Trail Stage} = "TIGHT_TRAIL"',  "column_id": "Trail Stage"}, "color": GREEN, "fontWeight": "bold"},
+        # P&L colouring
+        {"if": {"filter_query": '{P&L %} contains "+"', "column_id": "P&L %"}, "color": GREEN, "fontWeight": "bold"},
+        {"if": {"filter_query": '{P&L %} contains "-"', "column_id": "P&L %"}, "color": RED,   "fontWeight": "bold"},
+        {"if": {"filter_query": '{P&L $} contains "+"', "column_id": "P&L $"}, "color": GREEN},
+        {"if": {"filter_query": '{P&L $} contains "-"', "column_id": "P&L $"}, "color": RED},
+        {"if": {"filter_query": '{Gain ×ATR} contains "+"', "column_id": "Gain ×ATR"}, "color": GREEN},
+        {"if": {"filter_query": '{Gain ×ATR} contains "-"', "column_id": "Gain ×ATR"}, "color": RED},
     ]
 
     pos_table = dash_table.DataTable(
@@ -886,17 +1502,136 @@ def _build_live_positions_card():
         page_size=20,
     )
 
-    return _card([
-        html.H6("🟢 Live Position Management — Sell-Side State",
-                style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
-        html.Div(
-            f"Tracked positions with trailing stops, partial exits, and time stops.  "
-            f"Time stop: {config.TIME_STOP_DAYS}d max hold.  "
-            f"Partial exits at +{config.PARTIAL_EXIT_1_TRIGGER_ATR:.0f}×ATR and +{config.PARTIAL_EXIT_2_TRIGGER_ATR:.0f}×ATR.  "
-            f"Trail stages: INITIAL → BREAKEVEN → PROFIT_LOCK → TIGHT_TRAIL.",
-            style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
-        ),
-        pos_table,
+    # ── Assemble all sell-side cards ─────────────────────────────────────────
+    return html.Div([
+        _card([
+            html.H6("🟢 Live Position Management — Sell-Side State",
+                    style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+            html.Div(
+                f"Tracked positions with trailing stops, partial exits, and time stops.  "
+                f"Time stop: {config.TIME_STOP_DAYS}d max hold.  "
+                f"Partial exits at +{config.PARTIAL_EXIT_1_TRIGGER_ATR:.0f}×ATR and +{config.PARTIAL_EXIT_2_TRIGGER_ATR:.0f}×ATR.  "
+                f"Trail stages: INITIAL → BREAKEVEN → PROFIT_LOCK → TIGHT_TRAIL.",
+                style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+            ),
+            live_stat_cards,
+        ]),
+
+        # Position health heatmap (full width — at-a-glance overview)
+        _card([
+            html.H6("🩺 Position Health Heatmap",
+                    style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+            html.Div(
+                "Colour-coded snapshot of each position across key health dimensions.  "
+                "Red = poor/at-risk, Yellow = caution, Green/Blue = healthy/advanced.  "
+                "P&L normalised ±10%, ATR ±2→+3×, Hold inverted (more time = better), Stage 0–3, Partials 0–2.",
+                style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+            ),
+            dcc.Graph(figure=health_fig, config={"displayModeBar": False}),
+        ]),
+
+        # Price ladder (full width — the main sell-side visualization)
+        _card([
+            html.H6("🎯 Price Ladder — Entry, Stops, Partials & Targets",
+                    style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+            html.Div(
+                "Horizontal bars show the risk zone (stop→entry, red), "
+                "profit-taking zones (P1 at +2×ATR, P2 at +3×ATR), and full target.  "
+                "◆ = current price.  ◀ = trailing stop level.",
+                style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+            ),
+            dcc.Graph(figure=ladder_fig, config={"displayModeBar": False}),
+        ]),
+
+        # Row: stage donut + holding period + unrealized P&L
+        dbc.Row([
+            dbc.Col(_card([
+                dcc.Graph(figure=stage_fig, config={"displayModeBar": False}),
+            ]), width=3),
+            dbc.Col(_card([
+                dcc.Graph(figure=hold_fig, config={"displayModeBar": False}),
+            ]), width=4),
+            dbc.Col(_card([
+                dcc.Graph(figure=pnl_fig, config={"displayModeBar": False}),
+            ]), width=5),
+        ], className="mb-3"),
+
+        # Row: ATR efficiency scatter + Exit proximity radar
+        dbc.Row([
+            dbc.Col(_card([
+                html.H6("📈 ATR Efficiency — Gain vs Time",
+                        style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+                html.Div(
+                    "Each position plotted by days held vs ATR multiples gained.  "
+                    "Bubble size ∝ exposure.  Colour = trail stage.  "
+                    "Dotted lines mark trail-stage triggers; red vertical = time stop.",
+                    style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+                ),
+                dcc.Graph(figure=efficiency_fig, config={"displayModeBar": False}),
+            ]), width=6),
+            dbc.Col(_card([
+                html.H6("🎯 Exit Proximity Radar",
+                        style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+                html.Div(
+                    "Radar chart showing % progress toward each exit trigger.  "
+                    "P1/P2/Target = price progress from entry.  "
+                    "Time Stop = days held as % of max.  Trail Stop Hit = closeness to stop.",
+                    style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+                ),
+                dcc.Graph(figure=prox_fig, config={"displayModeBar": False}),
+            ]), width=6),
+        ], className="mb-3"),
+
+        # Risk/reward breakdown (full width)
+        _card([
+            html.H6("⚖️ Risk / Reward Breakdown",
+                    style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+            html.Div(
+                f"Red bar = downside risk to trailing stop.  "
+                f"Yellow = gain at Partial 1 ({config.PARTIAL_EXIT_1_FRACTION:.0%} @ +{config.PARTIAL_EXIT_1_TRIGGER_ATR:.0f}×ATR).  "
+                f"Green = incremental at Partial 2 ({config.PARTIAL_EXIT_2_FRACTION:.0%} @ +{config.PARTIAL_EXIT_2_TRIGGER_ATR:.0f}×ATR).  "
+                f"Blue = incremental to full target (+{config.ATR_TARGET_MULTIPLIER:.0f}×ATR).",
+                style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+            ),
+            dcc.Graph(figure=rr_fig, config={"displayModeBar": False}),
+        ]),
+
+        # Row: trailing stop progression + P&L distribution
+        dbc.Row([
+            dbc.Col(_card([
+                html.H6("📐 Trailing Stop Progression",
+                        style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+                html.Div(
+                    "How far each position's trailing stop has moved from its initial level.  "
+                    "Green = stop has tightened (protecting gains).  Grey = no movement yet.",
+                    style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+                ),
+                dcc.Graph(figure=trail_fig, config={"displayModeBar": False}),
+            ]), width=7),
+            dbc.Col(_card([
+                html.H6("📊 P&L Distribution",
+                        style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+                html.Div(
+                    "Box plot showing the spread of unrealized P&L across all positions.  "
+                    "Individual dots show each position.  Dotted line = average.",
+                    style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+                ),
+                dcc.Graph(figure=dist_fig, config={"displayModeBar": False}),
+            ]), width=5),
+        ], className="mb-3"),
+
+        # Detailed table
+        _card([
+            html.H6("📋 Position Detail Table",
+                    style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+            html.Div(
+                "Sortable/filterable.  P&L columns show unrealized gain/loss.  "
+                "Gain ×ATR = how many ATR units above/below entry.  "
+                "Partials = which staged exits have been taken (1 and/or 2).",
+                style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+            ),
+            pos_table,
+        ]),
     ])
 
 
@@ -1466,7 +2201,7 @@ def _log_layout():
 # ---------------------------------------------------------------------------
 
 _INPUT_STYLE = {
-    "backgroundColor": "#21262d",
+    "backgroundColor": "#faf9f7",
     "color": TEXT,
     "border": f"1px solid {BORDER}",
     "borderRadius": "4px",
@@ -1749,7 +2484,7 @@ def _trades_layout():
                 size=8,
             ),
             fill="tozeroy",
-            fillcolor="rgba(88,166,255,0.08)",
+            fillcolor="rgba(90,90,90,0.06)",
             hovertemplate="%{x}<br>Cum P&L: $%{y:+,.2f}<extra></extra>",
         ))
         pnl_fig.add_hline(y=0, line_color=BORDER, line_dash="dash")
@@ -1794,7 +2529,7 @@ def _trades_layout():
                         {"label": "📦 ETF",   "value": "ETF"},
                     ],
                     value="STOCK",
-                    style={"backgroundColor": "#21262d", "color": BRAND_BG, "fontFamily": "monospace"},
+                    style={"backgroundColor": "#faf9f7", "color": TEXT, "fontFamily": "monospace"},
                     clearable=False,
                 ),
             ], width=1),
@@ -1804,7 +2539,7 @@ def _trades_layout():
                     id="trade-action",
                     options=[{"label": "BUY", "value": "BUY"}, {"label": "SELL", "value": "SELL"}],
                     value="BUY",
-                    style={"backgroundColor": "#21262d", "color": BRAND_BG, "fontFamily": "monospace"},
+                    style={"backgroundColor": "#faf9f7", "color": TEXT, "fontFamily": "monospace"},
                     clearable=False,
                 ),
             ], width=1),
@@ -1995,9 +2730,9 @@ def _overview_layout():
             "bgcolor": CARD_BG,
             "bordercolor": BORDER,
             "steps": [
-                {"range": [0, 60],  "color": "#1a2332"},
-                {"range": [60, 80], "color": "#2a2a1a"},
-                {"range": [80, 100],"color": "#2a1a1a"},
+                {"range": [0, 60],  "color": "#f0f0ed"},
+                {"range": [60, 80], "color": "#e8e5df"},
+                {"range": [80, 100],"color": "#f0dada"},
             ],
             "threshold": {
                 "line": {"color": YELLOW, "width": 3},
@@ -2172,7 +2907,112 @@ def _overview_layout():
         ]),
     ])
 
-    # ── 6. Watchlist grid ─────────────────────────────────────────────────────
+    # ── 6.5 Mini sell-side summary for overview tab ─────────────────────────
+    sellside_summary_card = html.Div()  # default empty
+    if positions:
+        # Fetch current prices for mini summary
+        overview_prices = _fetch_current_prices(list(positions.keys()))
+
+        # Build mini data for each position
+        ov_syms = []
+        ov_pnl_pcts = []
+        ov_stages = []
+        ov_hold_days = []
+        ov_gain_atrs = []
+        for sym, state in positions.items():
+            cur = overview_prices.get(sym)
+            entry = state.entry_price
+            atr = state.atr_14_abs
+            hd = (datetime.date.today() - state.entry_date).days
+            pnl_pct = ((cur / entry - 1) * 100) if cur and entry > 0 else 0
+            gain_atr = ((cur - entry) / atr) if cur and atr > 0 else 0
+
+            ov_syms.append(sym)
+            ov_pnl_pcts.append(round(pnl_pct, 1))
+            ov_stages.append(state.trailing_stop.stage_label)
+            ov_hold_days.append(hd)
+            ov_gain_atrs.append(round(gain_atr, 2))
+
+        # Mini P&L bar
+        mini_pnl_fig = go.Figure(go.Bar(
+            x=ov_syms, y=ov_pnl_pcts,
+            marker_color=[GREEN if v >= 0 else RED for v in ov_pnl_pcts],
+            text=[f"{v:+.1f}%" for v in ov_pnl_pcts],
+            textposition="outside",
+            hovertemplate="%{x}: %{y:+.1f}%<extra></extra>",
+        ))
+        mini_pnl_fig.add_hline(y=0, line_color=BORDER, line_dash="dash")
+        mini_pnl_fig.update_layout(
+            title="Open Positions — Unrealized P&L %",
+            paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+            font=dict(color=TEXT),
+            xaxis=dict(color=TEXT, gridcolor=BORDER),
+            yaxis=dict(color=TEXT, gridcolor=BORDER, title="P&L %"),
+            margin=dict(t=40, b=20, l=20, r=20),
+            height=220,
+        )
+
+        # Mini trail stage indicator
+        _stage_colour = {"INITIAL": MUTED, "BREAKEVEN": YELLOW,
+                         "PROFIT_LOCK": GREEN, "TIGHT_TRAIL": ACCENT}
+        mini_stage_fig = go.Figure(go.Bar(
+            x=ov_syms,
+            y=[{"INITIAL": 1, "BREAKEVEN": 2, "PROFIT_LOCK": 3, "TIGHT_TRAIL": 4}.get(s, 0)
+               for s in ov_stages],
+            marker_color=[_stage_colour.get(s, MUTED) for s in ov_stages],
+            text=ov_stages,
+            textposition="inside",
+            hovertemplate="%{x}: %{text}<br>Hold: " +
+                          "".join("") +  # placeholder
+                          "<extra></extra>",
+            customdata=list(zip(ov_hold_days, ov_gain_atrs)),
+        ))
+        mini_stage_fig.update_layout(
+            title="Trail Stage + Holding Days",
+            paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+            font=dict(color=TEXT),
+            xaxis=dict(color=TEXT, gridcolor=BORDER),
+            yaxis=dict(
+                color=TEXT, gridcolor=BORDER,
+                tickvals=[1, 2, 3, 4],
+                ticktext=["INITIAL", "BREAKEVEN", "PROFIT_LOCK", "TIGHT_TRAIL"],
+                title="Trail Stage",
+            ),
+            margin=dict(t=40, b=20, l=20, r=20),
+            height=220,
+        )
+
+        # Summary metrics
+        total_unreal_pct = sum(ov_pnl_pcts) / len(ov_pnl_pcts) if ov_pnl_pcts else 0
+        best_pos = max(zip(ov_syms, ov_pnl_pcts), key=lambda x: x[1]) if ov_pnl_pcts else ("—", 0)
+        worst_pos = min(zip(ov_syms, ov_pnl_pcts), key=lambda x: x[1]) if ov_pnl_pcts else ("—", 0)
+        n_in_profit = sum(1 for v in ov_pnl_pcts if v > 0)
+        avg_gain_atr = sum(ov_gain_atrs) / len(ov_gain_atrs) if ov_gain_atrs else 0
+
+        sellside_summary_card = _card([
+            html.H6("📊 Sell-Side Summary — Open Positions",
+                    style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+            html.Div(
+                "Quick view of open position performance.  See 💰 Risk & Capital tab for full sell-side dashboard.",
+                style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+            ),
+            dbc.Row([
+                _stat_card("Avg P&L", f"{total_unreal_pct:+.1f}%",
+                           GREEN if total_unreal_pct >= 0 else RED),
+                _stat_card("Best", f"{best_pos[0]} {best_pos[1]:+.1f}%", GREEN),
+                _stat_card("Worst", f"{worst_pos[0]} {worst_pos[1]:+.1f}%", RED),
+                _stat_card("In Profit", f"{n_in_profit}/{len(ov_pnl_pcts)}",
+                           GREEN if n_in_profit > len(ov_pnl_pcts) / 2 else YELLOW),
+                _stat_card("Avg ×ATR", f"{avg_gain_atr:+.1f}×",
+                           GREEN if avg_gain_atr > 0 else RED),
+            ], className="mb-2"),
+            dbc.Row([
+                dbc.Col(dcc.Graph(figure=mini_pnl_fig, config={"displayModeBar": False}), width=6),
+                dbc.Col(dcc.Graph(figure=mini_stage_fig, config={"displayModeBar": False}), width=6),
+            ]),
+        ])
+
+    # ── 7. Watchlist grid ─────────────────────────────────────────────────────
     wl_rows = []
     for i, sym in enumerate(WATCHLIST):
         is_tracked = sym in positions
@@ -2222,6 +3062,7 @@ def _overview_layout():
             dbc.Col(_card(dcc.Graph(figure=gauge_fig, config={"displayModeBar": False})), width=4),
             exposure_chart,
         ], className="mb-3"),
+        sellside_summary_card,
         config_card,
         activity_card,
         watchlist_card,
@@ -2331,7 +3172,7 @@ def refresh_screener(n_clicks):
     # Colour-code sell recommendation cells
     sell_colours = [
         {"if": {"filter_query": '{Sell Rec} = "STRONG_SELL"',   "column_id": "Sell Rec"}, "color": RED,    "fontWeight": "bold"},
-        {"if": {"filter_query": '{Sell Rec} = "CONSIDER_SELL"', "column_id": "Sell Rec"}, "color": "#f0883e", "fontWeight": "bold"},
+        {"if": {"filter_query": '{Sell Rec} = "CONSIDER_SELL"', "column_id": "Sell Rec"}, "color": ORANGE, "fontWeight": "bold"},
         {"if": {"filter_query": '{Sell Rec} = "HOLD"',          "column_id": "Sell Rec"}, "color": YELLOW},
         {"if": {"filter_query": '{Sell Rec} = "ADD"',           "column_id": "Sell Rec"}, "color": GREEN},
         {"if": {"filter_query": '{RSI Sig} = "OVERBOUGHT"',     "column_id": "RSI Sig"},  "color": RED},
@@ -2341,7 +3182,7 @@ def refresh_screener(n_clicks):
         {"if": {"filter_query": '{MACD Sig} = "BEARISH_CROSS"', "column_id": "MACD Sig"}, "color": RED},
         {"if": {"filter_query": '{MACD Sig} = "BULLISH"',       "column_id": "MACD Sig"}, "color": GREEN},
         {"if": {"filter_query": "{Sell Score} >= 75",           "column_id": "Sell Score"}, "color": RED,   "fontWeight": "bold"},
-        {"if": {"filter_query": "{Sell Score} >= 45 && {Sell Score} < 75", "column_id": "Sell Score"}, "color": "#f0883e"},
+        {"if": {"filter_query": "{Sell Score} >= 45 && {Sell Score} < 75", "column_id": "Sell Score"}, "color": ORANGE},
         {"if": {"filter_query": "{Sell Score} < 20",            "column_id": "Sell Score"}, "color": GREEN},
         {"if": {"filter_query": '{Vol} = "HIGH"',               "column_id": "Vol"},       "color": RED},
         {"if": {"filter_query": '{Vol} = "LOW"',                "column_id": "Vol"},       "color": GREEN},
@@ -2373,7 +3214,7 @@ def refresh_screener(n_clicks):
         _stat_card("🟡 Dip Alerts",     str(n_dip),               YELLOW),
         _stat_card("⚪ Watch",           str(n_watch),             MUTED),
         _stat_card("🔴 Strong Sell",    str(n_strong_sell),       RED),
-        _stat_card("🟠 Consider Sell",  str(n_consider_sell),     "#f0883e"),
+        _stat_card("🟠 Consider Sell",  str(n_consider_sell),     ORANGE),
         _stat_card("Tickers Scanned",   str(len(df)),             ACCENT),
         _stat_card("Price Sources",     src_summary or "—",       MUTED),
     ])
@@ -2486,7 +3327,7 @@ def tick_clock(_, current_label):
 
 def _parse_args():
     parser = argparse.ArgumentParser(description="Buy-the-sauce live dashboard")
-    parser.add_argument("--port", type=int, default=8052)
+    parser.add_argument("--port", type=int, default=8055)
     parser.add_argument("--no-browser", action="store_true")
     return parser.parse_args()
 

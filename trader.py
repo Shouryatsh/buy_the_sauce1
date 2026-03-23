@@ -313,6 +313,46 @@ def run_scan(dry_run: bool = False) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Position management only  (lightweight — no buy scan)
+# ---------------------------------------------------------------------------
+
+def run_manage_only(dry_run: bool = False) -> dict:
+    """Run sell-side position management without scanning for new buys.
+
+    This is the lightweight loop that should run every 15 minutes:
+    - Fetches current prices for all tracked positions
+    - Updates trailing stops (and pushes to IBKR)
+    - Fires partial exits at +2×ATR and +3×ATR
+    - Closes time-stopped positions
+    - Checks scaled entry RSI abort / expiry
+
+    Connects to IBKR only if there are tracked positions and dry_run=False.
+    """
+    if not _open_positions:
+        logger.debug("[MANAGE] No tracked positions — nothing to do")
+        return {"trailing_updates": [], "partial_exits": [], "time_stops": [], "full_exits": []}
+
+    logger.info("[MANAGE] === Position management cycle — %d position(s) ===", len(_open_positions))
+
+    if dry_run:
+        result = manage_open_positions(broker=None, dry_run=True)
+        logger.info("[MANAGE] Dry-run result: %s", result)
+        return result
+
+    try:
+        with IBKRBroker() as broker:
+            result = manage_open_positions(broker=broker, dry_run=False)
+            logger.info("[MANAGE] Result: %s", result)
+            _save_state()
+            return result
+    except Exception as exc:
+        logger.error("[MANAGE] IBKR connection failed — %s.  Stops are still active at broker level.", exc)
+        # Even if we can't connect, run the logic in dry-run mode to log state
+        result = manage_open_positions(broker=None, dry_run=True)
+        return result
+
+
+# ---------------------------------------------------------------------------
 # Position management state  (persisted to JSON across scan cycles)
 # ---------------------------------------------------------------------------
 

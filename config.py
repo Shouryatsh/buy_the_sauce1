@@ -13,6 +13,24 @@ IBKR_PORT: int = 7497
 IBKR_CLIENT_ID: int = 1
 
 # ---------------------------------------------------------------------------
+# Automation / scheduling
+# ---------------------------------------------------------------------------
+# Buy scan times — full pipeline (fundamentals + dip detect + ML + order placement)
+# Format: list of "HH:MM" strings in US/Eastern time.
+BUY_SCAN_TIMES: list = ["09:45", "12:45", "14:45"]
+
+# Position management interval — lightweight (trailing stops, partials, time stops)
+# Runs every N minutes during market hours.  Skips buy scan logic entirely.
+MANAGE_INTERVAL_MINUTES: int = 15
+
+# Market hours (US/Eastern).  Management loop only runs inside this window.
+MARKET_OPEN_TIME: str  = "09:30"
+MARKET_CLOSE_TIME: str = "16:00"
+
+# Heartbeat: log "still alive" every N minutes even when idle
+HEARTBEAT_INTERVAL_MINUTES: int = 60
+
+# ---------------------------------------------------------------------------
 # Risk management
 # ---------------------------------------------------------------------------
 STOP_LOSS_PCT: float = 0.07       # 7% below entry price (fallback when ATR unavailable)

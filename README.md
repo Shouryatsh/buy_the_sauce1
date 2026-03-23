@@ -12,7 +12,7 @@ and **partial profit-taking** — through Interactive Brokers (IBKR) via
 ## Architecture
 
 ```
-run.py                  ← CLI entry point (once / scheduled)
+run.py                  ← Production automation (buy scans + management loop)
  └─ trader.py           ← Orchestration (screen → detect → size → execute → manage)
      ├─ screener.py     ← Fundamental quality filter (FCF, ROIC, D/E, accruals)
      ├─ dip_detector.py ← Technical dip-scoring (RSI, MA50, MA200, 52-wk range)
@@ -20,7 +20,7 @@ run.py                  ← CLI entry point (once / scheduled)
      ├─ risk_manager.py ← Position sizing, stops, trailing stops, partials, scaled entry
      └─ broker.py       ← IBKR order execution (bracket, scaled, partial sell, stop update)
 
-dashboard.py            ← Live Dash-based web dashboard (5 tabs)
+dashboard.py            ← Live Dash-based web dashboard (6 tabs)
 backtest_ml.py          ← Walk-forward ML ensemble backtest with trailing stop simulation
 config.py               ← All tuneable parameters (single source of truth)
 watchlist.py            ← ~50 tickers to scan
@@ -58,13 +58,15 @@ edgar.py                ← SEC EDGAR fundamentals + price history (IBKR / yfina
 | **Time stop** | Exit at market after 30 calendar days (configurable) |
 | **Scaled entry** | 3-tranche buy ladder at −0/1/2×ATR with RSI abort & expiry |
 
-### Execution (`broker.py`, `trader.py`)
+### Execution (`broker.py`, `trader.py`, `run.py`)
 
+- **Automated scheduling**: Buy scans at 09:45 / 12:45 / 14:45 ET. Position management every 15 min during market hours (09:30–16:00 ET). End-of-day sweep after close.
 - **Buy-side**: Scaled entry (buy ladder) with per-tranche limit orders + shared protective stop.
 - **Sell-side**: Trailing stop updates pushed to IBKR, partial exit orders, market close for time stops.
-- **Position management loop**: `manage_open_positions()` runs every scan cycle — updates trailing stops, evaluates partial exits, checks time stops, and aborts stale scaled entry tranches.
+- **Position management loop**: Lightweight `run_manage_only()` every 15 min — updates trailing stops, evaluates partial exits, checks time stops, and aborts stale scaled entry tranches. Does NOT re-scan for new buys.
 - **State persistence**: Position state serialised to `results/position_state.json` — survives restarts.
-- **Safety**: Pre-trade checks (duplicate guard, position-size cap, equity check), kill switch.
+- **Safety**: Pre-trade checks (duplicate guard, position-size cap, equity check), kill switch, graceful shutdown (Ctrl-C / SIGTERM), heartbeat logging.
+- **Market awareness**: Auto-skips weekends and NYSE holidays. All times US/Eastern.
 
 ### Dashboard (`dashboard.py`)
 
@@ -75,6 +77,7 @@ edgar.py                ← SEC EDGAR fundamentals + price history (IBKR / yfina
 3. **📈 Back-test** — Equity curve + trade log from walk-forward ML backtest.
 4. **🗂 Screen Log** — Historical screener runs.
 5. **📒 My Trades** — Manual transaction journal with P&L tracking.
+6. **🏠 System Overview** — IBKR/ML status, open positions, portfolio utilisation gauge, config summary, watchlist grid.
 
 ### Backtesting (`backtest_ml.py`)
 
@@ -154,34 +157,61 @@ Edit **`config.py`** to adjust. Key parameters:
 | `SCALED_ENTRY_RSI_ABORT_LEVEL` | `50.0` | Cancel T2/T3 if RSI > 50 |
 | `SCALED_ENTRY_EXPIRY_DAYS` | `5` | Unfilled limits expire after 5d |
 
+### Scheduling / Automation
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `BUY_SCAN_TIMES` | `["09:45","12:45","14:45"]` | Buy scan times (ET) |
+| `MANAGE_INTERVAL_MINUTES` | `15` | Position management every N min |
+| `MARKET_OPEN_TIME` | `"09:30"` | Market open (ET) |
+| `MARKET_CLOSE_TIME` | `"16:00"` | Market close (ET) |
+| `HEARTBEAT_INTERVAL_MINUTES` | `60` | Log heartbeat every N min |
+
 Edit **`watchlist.py`** to customise the list of tickers scanned.
 
 ---
 
 ## Usage
 
-### Dry run (no orders — review signals)
+### Full automation (paper trading)
 
 ```bash
-python run.py --dry-run
+# Start IBKR TWS in paper-trading mode (port 7497), then:
+python run.py                   # Buy scans @ 09:45/12:45/14:45 + manage every 15m
 ```
 
-### Live scan (connects to IBKR, places orders, manages positions)
+This is the "set and forget" mode. It will:
+- Run buy scans at 09:45, 12:45, and 14:45 ET (configurable in `config.py`)
+- Run position management (trailing stops, partial exits, time stops) every 15 minutes
+- Run an end-of-day sweep after market close
+- Log a heartbeat every 60 minutes
+- Auto-skip weekends and NYSE holidays
+- Gracefully exit on Ctrl-C or SIGTERM
+
+### Dry run (audit mode — no real orders)
 
 ```bash
-python run.py
+python run.py --dry-run         # Same schedule, but logs actions without placing orders
 ```
 
-### Scheduled daily scan at 09:45 US-Eastern
+### Manage existing positions only (no new buys)
 
 ```bash
-python run.py --schedule 09:45
+python run.py --manage-only     # Only trailing stops, partials, time stops — every 15m
+```
+
+### Single execution (run once, then exit)
+
+```bash
+python run.py --once                 # One buy scan + manage cycle
+python run.py --once --dry-run       # One dry-run scan
+python run.py --once --manage-only   # One management cycle
 ```
 
 ### Dashboard
 
 ```bash
-python dashboard.py              # opens on http://127.0.0.1:8050
+python dashboard.py              # opens on http://127.0.0.1:8052
 python dashboard.py --port 8080  # custom port
 ```
 
@@ -198,7 +228,8 @@ python backtest_ml.py --trades                # print per-ticker trade log
 
 ```
 --dry-run             Evaluate signals and sizes only — no orders placed
---schedule HH:MM      Run every day at this time (24-hour, US-Eastern)
+--manage-only         Position management loop only — skip all buy scans
+--once                Run a single cycle and exit (don't loop)
 --log-level LEVEL     DEBUG | INFO | WARNING | ERROR  (default: INFO)
 ```
 
