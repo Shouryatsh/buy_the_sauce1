@@ -428,6 +428,48 @@ def get_fundamentals(symbol: str) -> dict:
         avg_assets_prior = (total_assets_vals[1] + total_assets_vals[2]) / 2
         result["accruals_ratio_prior"] = (net_income_vals[1] - fcf_history[1]) / avg_assets_prior
 
+    # --- Raw balance sheet items for valuation engine ---
+    # Cash & equivalents
+    cash_vals = (
+        _get_annual_values(facts, "CashAndCashEquivalentsAtCarryingValue")
+        or _get_annual_values(facts, "CashCashEquivalentsAndShortTermInvestments")
+        or _get_annual_values(facts, "Cash")
+    )
+    if cash_vals:
+        result["_cash"] = cash_vals[0]
+
+    # Total debt (short-term + long-term)
+    short_debt_vals = (
+        _get_annual_values(facts, "ShortTermBorrowings")
+        or _get_annual_values(facts, "CommercialPaper")
+    )
+    total_debt = 0.0
+    if ltd_vals:
+        total_debt += ltd_vals[0]
+        result["_long_term_debt"] = ltd_vals[0]
+    if short_debt_vals:
+        total_debt += short_debt_vals[0]
+    if total_debt > 0:
+        result["_total_debt"] = total_debt
+
+    # Stockholders' equity (raw)
+    if equity_vals:
+        result["_equity"] = equity_vals[0]
+
+    # Total assets
+    if total_assets_vals:
+        result["_total_assets"] = total_assets_vals[0]
+
+    # Net income (raw, for valuation)
+    if net_income_vals:
+        result["_net_income"] = net_income_vals[0]
+        if len(net_income_vals) > 1:
+            result["_net_income_prior"] = net_income_vals[1]
+
+    # Operating cash flow (raw)
+    if op_cf_vals:
+        result["_operating_cf"] = op_cf_vals[0]
+
     # --- Receivables growth vs revenue growth ---
     receivables_vals = (
         _get_annual_values(facts, "AccountsReceivableNetCurrent")
@@ -452,6 +494,12 @@ def get_fundamentals(symbol: str) -> dict:
     latest_price: Optional[float] = None
     if price_hist is not None and not price_hist.empty:
         latest_price = _safe(price_hist["Close"].iloc[-1])
+        if latest_price is not None:
+            result["latestPrice"] = latest_price
+
+    # --- Shares outstanding ---
+    if shares_vals:
+        result["sharesOutstanding"] = shares_vals[0]
 
     # --- Market cap ---
     if shares_vals and latest_price:

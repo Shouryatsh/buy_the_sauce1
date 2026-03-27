@@ -134,10 +134,25 @@ def screen_fundamental(
     except Exception:
         pass  # ml_predictor may not be imported yet — safe to ignore
 
+    # ── Backfill _fcf_history from _ticker mock (test compatibility) ────────
+    # In production the info dict already contains _fcf_history from edgar.py.
+    # In tests a mock Ticker with a cashflow DataFrame is passed via _ticker.
+    if "_fcf_history" not in info and _ticker is not None:
+        try:
+            cf = _ticker.cashflow
+            if cf is not None and not cf.empty and "Free Cash Flow" in cf.index:
+                row = cf.loc["Free Cash Flow"]
+                info["_fcf_history"] = [float(v) for v in row.values if v is not None]
+        except Exception:
+            pass
+
     profile = FundamentalProfile(symbol=symbol)
 
     # --- 1. P/E ratio ---
-    pe = _safe_float(info.get("forwardPE") or info.get("trailingPE"))
+    # Guard against 0.0 being falsy — use explicit None check
+    fwd_pe = _safe_float(info.get("forwardPE"))
+    trail_pe = _safe_float(info.get("trailingPE"))
+    pe = fwd_pe if fwd_pe is not None else trail_pe
     if pe is not None:
         profile.pe_ratio = pe
         if pe <= config.MIN_PE_RATIO:
@@ -211,7 +226,7 @@ def screen_fundamental(
         if fcf_increasing is False:   # None = insufficient data → benefit of the doubt
             profile.passes = False
             profile.fail_reasons.append(
-                f"FCF grew in fewer than {config.FCF_MIN_GROWTH_YEARS} of last "
+                f"FCF not increasing — grew in fewer than {config.FCF_MIN_GROWTH_YEARS} of last "
                 f"{config.FCF_GROWTH_LOOKBACK_YEARS} year(s)"
             )
 

@@ -235,6 +235,29 @@ ML_MEDIUM_CONFIDENCE_THRESHOLD: float = 0.55   # 55–65% → MEDIUM  (<55% → 
 ML_GATE_BUY_SIGNAL: bool = True
 
 # ---------------------------------------------------------------------------
+# Insider transaction analysis  (insider.py — SEC EDGAR Form 4 filings)
+# ---------------------------------------------------------------------------
+INSIDER_ENABLED: bool = True              # Set False to skip insider analysis
+INSIDER_LOOKBACK_DAYS: int = 90           # How far back to look for insider trades
+INSIDER_CLUSTER_BUY_MIN: int = 3          # Minimum distinct insiders for cluster buy
+INSIDER_CLUSTER_BUY_WINDOW_DAYS: int = 7  # Time window for cluster buy detection
+# Signal gating: require insider score ≥ threshold to boost a BUY signal.
+# Set False to show insider data as info-only (no gate).
+INSIDER_GATE_BUY_SIGNAL: bool = False     # info-only by default
+INSIDER_MIN_SCORE_FOR_GATE: int = 65      # insider score must be ≥ this to pass gate
+
+# ---------------------------------------------------------------------------
+# Valuation engine  (valuation.py — multi-model conservative valuation)
+# ---------------------------------------------------------------------------
+VALUATION_ENABLED: bool = True            # Set False to skip valuation entirely
+# When True, only tickers that pass the fundamental screen get valued
+# (saves ~0.5s per skipped ticker).  Set False to value ALL watchlist tickers.
+VALUATION_ONLY_FUND_PASS: bool = False
+# Signal gating: require valuation signal ∈ {DEEP_VALUE, UNDERVALUED} to
+# promote a dip to a full BUY SIGNAL.  Set False to show valuation as info-only.
+VALUATION_GATE_BUY_SIGNAL: bool = False   # info-only by default
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 LOG_FILE: str = "trading.log"

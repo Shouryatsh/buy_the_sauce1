@@ -16,9 +16,12 @@ Usage
   python3 dashboard.py --port 8080  # custom port
   python3 dashboard.py --no-browser # don't auto-open browser tab
 
-The screener tab has a "🔄 Refresh" button that re-runs the full data
-fetch on demand (same pipeline as run_screen.py).  A countdown timer
-shows the time since the last refresh.
+The screener tab has a "🧠 Re-run Model" button that re-runs the full data
+fetch on demand (same pipeline as run_screen.py), and a "📡 Refresh Prices"
+button that updates only live prices without re-running the ML model.
+The My Trades tab has a "🔄 Refresh Trades" button that reloads the trade
+journal and live prices.  Saving a trade auto-refreshes the tab.
+A countdown timer shows the time since the last refresh.
 """
 
 from __future__ import annotations
@@ -329,6 +332,7 @@ def fetch_screen_data() -> list[dict]:
         info = {}
         profile = _fallback_profile(symbol, ["not fetched"])
         signal = None
+        insider_summary = None
         try:
             # --- price history first (IBKR → yfinance fallback) ---
             hist, price_source = edgar.get_price_history(symbol, period_years=2)
@@ -341,6 +345,58 @@ def fetch_screen_data() -> list[dict]:
                 profile = _fallback_profile(symbol, [f"fund error: {fund_exc}"])
             # --- dip signal ---
             signal = score_dip(symbol, hist) if hist is not None and not hist.empty else None
+            # --- insider trading activity (SEC EDGAR Form 4) ---
+            if config.INSIDER_ENABLED:
+                try:
+                    from insider import get_insider_activity
+                    # Get shares outstanding for % calculation
+                    shares_out = None
+                    try:
+                        cik = edgar._get_cik(symbol)
+                        if cik:
+                            facts = edgar._fetch_company_facts(cik)
+                            shares_vals = (
+                                edgar._get_annual_values(facts, "CommonStockSharesOutstanding", unit="shares")
+                                or edgar._get_annual_values(facts, "EntityCommonStockSharesOutstanding", unit="shares")
+                            )
+                            if shares_vals:
+                                shares_out = shares_vals[0]
+                    except Exception:
+                        pass
+                    insider_summary = get_insider_activity(
+                        symbol,
+                        lookback_days=config.INSIDER_LOOKBACK_DAYS,
+                        shares_outstanding=shares_out,
+                    )
+                    print(f"[dashboard] {symbol}: insider score={insider_summary.insider_score} "
+                          f"signal={insider_summary.insider_signal} "
+                          f"buys={insider_summary.total_insider_buys} "
+                          f"sells={insider_summary.total_insider_sells}")
+                except Exception as ins_exc:
+                    print(f"[dashboard] {symbol} insider fetch error: {ins_exc}")
+            # --- valuation engine (multi-model conservative) ---
+            val_result = None
+            if config.VALUATION_ENABLED:
+                if not config.VALUATION_ONLY_FUND_PASS or profile.passes:
+                    try:
+                        from valuation import valuate
+                        # Resolve current price and shares outstanding
+                        _val_price = round(s.price, 2) if s else info.get("latestPrice")
+                        _val_shares = info.get("sharesOutstanding")
+                        if _val_price and _val_price > 0 and info:
+                            val_result = valuate(
+                                symbol, info,
+                                current_price=_val_price,
+                                shares_outstanding=_val_shares,
+                            )
+                            print(f"[dashboard] {symbol}: valuation signal={val_result.valuation_signal} "
+                                  f"FV=${val_result.fair_value or 0:.2f} "
+                                  f"buy=${val_result.buy_price or 0:.2f} "
+                                  f"upside={val_result.upside_pct or 0:.1f}% "
+                                  f"quality={val_result.quality_tier}")
+                    except Exception as val_exc:
+                        print(f"[dashboard] {symbol} valuation error: {val_exc}")
+
         except Exception as exc:
             print(f"[dashboard] {symbol} fetch error: {exc}")
             traceback.print_exc()
@@ -351,6 +407,8 @@ def fetch_screen_data() -> list[dict]:
             "signal":       signal,
             "info":         info,
             "price_source": price_source,
+            "insider":      insider_summary,
+            "valuation":    val_result,
         })
     return records
 
@@ -480,9 +538,100 @@ def _records_to_df(records: list[dict]) -> pd.DataFrame:
         rec_vs_rev = f"{rec_gr} vs {rev_gr}"          # e.g. "+12.0% vs +8.0%"
         revenue_col   = _yoy_raw(getattr(p, "revenue_current", None), getattr(p, "revenue_prior", None))
 
+        # ── Insider activity ──────────────────────────────────────────────────
+        ins = r.get("insider")
+        if ins is not None:
+            from insider import CATEGORY_LABELS
+            ins_signal    = ins.insider_signal
+            ins_score     = ins.insider_score
+            ins_top_cat   = CATEGORY_LABELS.get(ins.top_category, ins.top_category)
+            ins_buys      = ins.total_insider_buys
+            ins_sells     = ins.total_insider_sells
+            ins_net_val   = ins.net_insider_value
+            ins_cluster   = "YES" if ins.cluster_buy_detected else "—"
+            ins_ceo_buy   = "YES" if ins.ceo_bought else "—"
+
+            # Build top-transaction details (up to 3)
+            ins_details = []
+            for txn in sorted(ins.transactions,
+                              key=lambda t: abs(t.total_value or 0), reverse=True)[:3]:
+                act = "BUY" if txn.acquired_disposed == "A" else "SELL"
+                p_str = f"${txn.price_per_share:,.2f}" if txn.price_per_share else "—"
+                v_str = f"${txn.total_value:,.0f}" if txn.total_value else "—"
+                pct_str = f"{txn.pct_of_outstanding:.3f}%" if txn.pct_of_outstanding else "—"
+                name_short = txn.filer_name.split(",")[0][:15] if txn.filer_name else "?"
+                ins_details.append(
+                    f"{name_short} ({txn.filer_title or txn.relationship}): "
+                    f"{act} {txn.shares:,.0f}sh @ {p_str} = {v_str} [{pct_str}]"
+                )
+            ins_detail_str = " | ".join(ins_details) if ins_details else "—"
+        else:
+            ins_signal   = "—"
+            ins_score    = None
+            ins_top_cat  = "—"
+            ins_buys     = 0
+            ins_sells    = 0
+            ins_net_val  = 0
+            ins_cluster  = "—"
+            ins_ceo_buy  = "—"
+            ins_detail_str = "—"
+
         # Signal label
-        if is_dip and fund_pass and (not config.ML_GATE_BUY_SIGNAL or not config.ML_ENABLED or ml_ok):
+        ml_pass = not config.ML_GATE_BUY_SIGNAL or not config.ML_ENABLED or ml_ok
+        insider_pass = (not config.INSIDER_GATE_BUY_SIGNAL
+                        or ins is None
+                        or ins.insider_score >= config.INSIDER_MIN_SCORE_FOR_GATE)
+
+        # ── Valuation extraction ──────────────────────────────────────────────
+        val = r.get("valuation")
+        if val is not None:
+            val_signal     = val.valuation_signal
+            val_grade      = val.valuation_grade
+            val_fv         = f"${val.fair_value:,.2f}" if val.fair_value else "—"
+            val_buy_price  = f"${val.buy_price:,.2f}" if val.buy_price else "—"
+            val_upside     = f"{val.upside_pct:+.1f}%" if val.upside_pct is not None else "—"
+            val_mos        = f"{val.margin_of_safety_pct:.0%}" if val.margin_of_safety_pct else "—"
+            val_quality    = f"{val.quality_tier} ({val.quality_score:.0f})"
+            val_implied_gr = f"{val.implied_growth_rate:.1%}" if val.implied_growth_rate is not None else "—"
+            val_gr_reason  = val.growth_reasonableness or "—"
+            val_fv_low     = f"${val.fair_value_low:,.2f}" if val.fair_value_low else "—"
+            val_fv_high    = f"${val.fair_value_high:,.2f}" if val.fair_value_high else "—"
+            val_moat       = ", ".join(val.moat_indicators[:3]) if val.moat_indicators else "—"
+
+            # Build model breakdown string (compact)
+            _model_parts = []
+            for m in val.models:
+                if m.fair_value_per_share is not None and m.fair_value_per_share > 0:
+                    _model_parts.append(f"{m.model_name}=${m.fair_value_per_share:,.0f}")
+                elif m.error:
+                    _model_parts.append(f"{m.model_name}=n/a")
+            val_models_str = " | ".join(_model_parts) if _model_parts else "—"
+        else:
+            val_signal     = "—"
+            val_grade      = "—"
+            val_fv         = "—"
+            val_buy_price  = "—"
+            val_upside     = "—"
+            val_mos        = "—"
+            val_quality    = "—"
+            val_implied_gr = "—"
+            val_gr_reason  = "—"
+            val_fv_low     = "—"
+            val_fv_high    = "—"
+            val_moat       = "—"
+            val_models_str = "—"
+
+        # Valuation gate (optional)
+        val_pass = (not config.VALUATION_GATE_BUY_SIGNAL
+                    or val is None
+                    or val.valuation_signal in ("DEEP_VALUE", "UNDERVALUED"))
+
+        if is_dip and fund_pass and ml_pass and insider_pass and val_pass:
             signal_label = "🟢 BUY"
+        elif is_dip and fund_pass and ml_pass and insider_pass and not val_pass:
+            signal_label = "🟡 DIP+FUND (Val↓)"
+        elif is_dip and fund_pass and ml_pass and not insider_pass:
+            signal_label = "🟡 DIP+FUND (Ins↓)"
         elif is_dip and fund_pass and config.ML_GATE_BUY_SIGNAL and ml_dir and not ml_ok:
             signal_label = "🟡 DIP+FUND (ML↓)"
         elif is_dip and not fund_pass:
@@ -544,6 +693,30 @@ def _records_to_df(records: list[dict]) -> pd.DataFrame:
             "_sector":    r["info"].get("sector") or r["info"].get("sectorDisp"),
             "_ml_prob":   (s.ml_probability or 0.0) if s else 0.0,
             "_signal":    signal_label,
+            # ── TABLE 4: Insider activity ─────────────────────────────────────
+            "Insider":       ins_signal,
+            "Ins Score":     ins_score,
+            "Ins Category":  ins_top_cat,
+            "Ins Buys":      ins_buys,
+            "Ins Sells":     ins_sells,
+            "Ins Net $":     f"${ins_net_val:+,.0f}" if ins_net_val else "—",
+            "Cluster Buy":   ins_cluster,
+            "CEO Buy":       ins_ceo_buy,
+            "Ins Details":   ins_detail_str,
+            # ── TABLE 5: Valuation ────────────────────────────────────────────
+            "Val Signal":    val_signal,
+            "Val Grade":     val_grade,
+            "Fair Value":    val_fv,
+            "Buy Below":     val_buy_price,
+            "Upside":        val_upside,
+            "MoS":           val_mos,
+            "Quality":       val_quality,
+            "Impl Growth":   val_implied_gr,
+            "Growth Check":  val_gr_reason,
+            "FV Low":        val_fv_low,
+            "FV High":       val_fv_high,
+            "Moat":          val_moat,
+            "Models":        val_models_str,
         })
     return pd.DataFrame(rows)
 
@@ -772,8 +945,15 @@ def _screener_layout():
     return html.Div([
         dbc.Row([
             dbc.Col(
-                dbc.Button("🔄 Refresh Data", id="refresh-btn", color="primary", size="sm",
-                           style={"fontFamily": "monospace"}),
+                dbc.Button("🧠 Re-run Model", id="refresh-btn", color="primary", size="sm",
+                           style={"fontFamily": "monospace"},
+                           title="Full pipeline: fetch data, run ML model, fundamentals, dip scoring"),
+                width="auto",
+            ),
+            dbc.Col(
+                dbc.Button("📡 Refresh Prices", id="refresh-prices-btn", color="secondary", size="sm",
+                           style={"fontFamily": "monospace"},
+                           title="Only update live prices for already-scanned tickers (no model re-run)"),
                 width="auto",
             ),
             dbc.Col(
@@ -796,7 +976,7 @@ def _screener_layout():
                 style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
             ),
             html.Div(id="screener-table-container",
-                     children=html.Div("Click 🔄 Refresh to load live data.",
+                     children=html.Div("Click 🧠 Re-run Model to load live data.",
                                        style={"color": MUTED, "fontFamily": "monospace"})),
         ]),
 
@@ -824,6 +1004,37 @@ def _screener_layout():
                 style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
             ),
             html.Div(id="swing-table-container",
+                     children=html.Div("Waiting for refresh…",
+                                       style={"color": MUTED, "fontFamily": "monospace"})),
+        ]),
+
+        # ── TABLE 4: Insider Activity ─────────────────────────────────────────
+        _card([
+            html.H6("🕵️ TABLE 4 — Insider Transactions (SEC EDGAR Form 4)",
+                    style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+            html.Div(
+                f"Last {config.INSIDER_LOOKBACK_DAYS}d insider trades from official SEC filings.  "
+                "CEO Open Market Buy = strongest signal  |  Cluster Buy = 3+ insiders in same week  |  "
+                "10b5-1 Plan = pre-scheduled (neutral)  |  Option Exercise = routine comp",
+                style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+            ),
+            html.Div(id="insider-table-container",
+                     children=html.Div("Waiting for refresh…",
+                                       style={"color": MUTED, "fontFamily": "monospace"})),
+        ]),
+
+        # ── TABLE 5: Valuation ────────────────────────────────────────────────
+        _card([
+            html.H6("💎 TABLE 5 — Conservative Valuation (Multi-Model)",
+                    style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+            html.Div(
+                "8 independent models: Two-Stage DCF, Reverse DCF, Earnings Power (Greenwald), "
+                "Graham Number, Excess Returns (Penman), DDM, Relative P/E, Asset Floor.  "
+                "Fair Value = weighted median.  Buy Below = Fair Value × (1 − Margin of Safety).  "
+                "More conservative than Morningstar: higher discount rates, lower growth, shorter horizons.",
+                style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+            ),
+            html.Div(id="valuation-table-container",
                      children=html.Div("Waiting for refresh…",
                                        style={"color": MUTED, "fontFamily": "monospace"})),
         ]),
@@ -1637,7 +1848,7 @@ def _build_live_positions_card():
 
 def _risk_layout(screen_df: pd.DataFrame | None):
     if screen_df is None or screen_df.empty:
-        return _card(html.Div("Run the screener first (📡 Screener → 🔄 Refresh).",
+        return _card(html.Div("Run the screener first (📡 Screener → 🧠 Re-run Model).",
                                style={"color": MUTED, "fontFamily": "monospace"}))
 
     risk_df, alloc = _risk_df(screen_df)
@@ -2211,9 +2422,108 @@ _INPUT_STYLE = {
     "padding": "6px 10px",
 }
 
-def _trades_layout():
-    """Build the full My Trades tab layout (form + summary + chart + table)."""
+def _trades_layout(trades_data=None):
+    """Build the full My Trades tab layout (form + summary + chart + table).
+
+    Args:
+        trades_data: optional dict from trades-store with status messages
+                     (from save_trade or refresh_trades_tab callbacks).
+    """
     df = _load_trades()
+
+    # ── Extract status message from trades-store (if present) ─────────────────
+    _status_msg = None
+    if trades_data and isinstance(trades_data, dict):
+        status_text = trades_data.get("status")
+        if status_text:
+            is_ok = trades_data.get("ok", True)
+            _status_msg = html.Span(status_text,
+                                    style={"color": GREEN if is_ok else RED})
+        error_text = trades_data.get("error")
+        if error_text:
+            _status_msg = html.Span(error_text, style={"color": YELLOW})
+
+    # ── Ensure asset_type is populated ────────────────────────────────────────
+    if not df.empty:
+        if "asset_type" not in df.columns:
+            df["asset_type"] = None
+        df["asset_type"] = df.apply(
+            lambda r: _infer_asset_type(r["symbol"], r.get("asset_type")), axis=1
+        )
+
+    # ── RSI heat-map (symbol × date) ─────────────────────────────────────────
+    rsi_pivot = df.pivot_table(index="symbol", columns="date", values="rsi", aggfunc="mean")
+    rsi_fig = go.Figure(go.Heatmap(
+        z=rsi_pivot.values,
+        x=rsi_pivot.columns.tolist(),
+        y=rsi_pivot.index.tolist(),
+        colorscale=[[0, RED], [0.35, YELLOW], [0.65, ACCENT], [1, GREEN]],
+        zmin=0, zmax=100,
+        colorbar=dict(
+            title=dict(text="RSI", font=dict(color=TEXT)),
+            tickfont=dict(color=TEXT),
+        ),
+        hovertemplate="Date: %{x}<br>Symbol: %{y}<br>RSI: %{z:.1f}<extra></extra>",
+    ))
+    rsi_fig.add_hline(y=-0.5, annotation_text="Oversold < 35",
+                      line_color=RED, line_dash="dot", annotation_font_color=RED)
+    rsi_fig.update_layout(
+        title="RSI Heat-map (symbol × date)",
+        paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+        font=dict(color=TEXT),
+        xaxis=dict(color=TEXT), yaxis=dict(color=TEXT),
+        margin=dict(t=40, b=20, l=20, r=20),
+    )
+
+    return html.Div([
+        dbc.Row([
+            dbc.Col(_card(dcc.Graph(figure=score_fig, config={"displayModeBar": False})), width=12),
+        ], className="mb-3"),
+        dbc.Row([
+            dbc.Col(_card(dcc.Graph(figure=rsi_fig,   config={"displayModeBar": False})), width=12),
+        ], className="mb-3"),
+        _card([
+            html.H6("Full Screen Log", style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "12px"}),
+            _make_table(df, "log-table"),
+        ]),
+    ])
+
+
+# ---------------------------------------------------------------------------
+# Tab 5 — My Trades (manual transaction journal)
+# ---------------------------------------------------------------------------
+
+_INPUT_STYLE = {
+    "backgroundColor": "#faf9f7",
+    "color": TEXT,
+    "border": f"1px solid {BORDER}",
+    "borderRadius": "4px",
+    "fontFamily": "monospace",
+    "fontSize": "13px",
+    "width": "100%",
+    "padding": "6px 10px",
+}
+
+def _trades_layout(trades_data=None):
+    """Build the full My Trades tab layout (form + summary + chart + table).
+
+    Args:
+        trades_data: optional dict from trades-store with status messages
+                     (from save_trade or refresh_trades_tab callbacks).
+    """
+    df = _load_trades()
+
+    # ── Extract status message from trades-store (if present) ─────────────────
+    _status_msg = None
+    if trades_data and isinstance(trades_data, dict):
+        status_text = trades_data.get("status")
+        if status_text:
+            is_ok = trades_data.get("ok", True)
+            _status_msg = html.Span(status_text,
+                                    style={"color": GREEN if is_ok else RED})
+        error_text = trades_data.get("error")
+        if error_text:
+            _status_msg = html.Span(error_text, style={"color": YELLOW})
 
     # ── Ensure asset_type is populated ────────────────────────────────────────
     if not df.empty:
@@ -2571,9 +2881,11 @@ def _trades_layout():
                 width="auto",
             ),
             dbc.Col(
-                html.Div(id="trade-save-status",
-                         style={"color": MUTED, "fontFamily": "monospace", "fontSize": "13px",
-                                "paddingTop": "6px"}),
+                html.Div(
+                    _status_msg or "",
+                    id="trade-save-status",
+                    style={"color": MUTED, "fontFamily": "monospace", "fontSize": "13px",
+                           "paddingTop": "6px"}),
                 width=True,
             ),
         ]),
@@ -2629,7 +2941,7 @@ def _trades_layout():
                           style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace"}),
                 html.Code("results/my_trades.csv",
                           style={"color": ACCENT, "fontSize": "11px"}),
-                html.Span(" and refresh the page to reload.",
+                html.Span(" and click 🔄 Refresh Trades to reload.",
                           style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace"}),
             ]),
         ])
@@ -2639,8 +2951,32 @@ def _trades_layout():
                      style={"color": MUTED, "fontFamily": "monospace"})
         )
 
-    return html.Div([stat_row, stat_row2, charts_row1, exit_plan_section,
-                      realized_charts, form_card, table_section])
+    # Determine refresh status message
+    _refresh_msg = ""
+    if trades_data and isinstance(trades_data, dict):
+        if trades_data.get("refreshed_at"):
+            _refresh_msg = _status_msg or ""
+
+    return html.Div([
+        # ── Refresh controls for this tab ─────────────────────────────────────
+        dbc.Row([
+            dbc.Col(
+                dbc.Button("🔄 Refresh Trades", id="refresh-trades-btn", color="secondary", size="sm",
+                           style={"fontFamily": "monospace"},
+                           title="Reload trade journal & live prices (no model re-run)"),
+                width="auto",
+            ),
+            dbc.Col(
+                html.Div(
+                    _refresh_msg, id="refresh-trades-status",
+                    style={"color": MUTED, "fontFamily": "monospace", "fontSize": "13px",
+                           "paddingTop": "6px"}),
+                width=True,
+            ),
+        ], className="mb-3"),
+        stat_row, stat_row2, charts_row1, exit_plan_section,
+        realized_charts, form_card, table_section,
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -2785,6 +3121,7 @@ def _overview_layout():
     # ── 4. Config summary card ────────────────────────────────────────────────
     config_card = _card([
         html.H6("⚙️ Config Summary", style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "12px"}),
+        html.Hr(style={"borderColor": BORDER}),
         dbc.Row([
             dbc.Col([
                 html.Div("Risk Management", style={"color": ACCENT, "fontFamily": "monospace", "fontWeight": "bold", "fontSize": "13px", "marginBottom": "4px"}),
@@ -2794,7 +3131,7 @@ def _overview_layout():
                          style={"fontFamily": "monospace", "fontSize": "12px"}),
                 html.Div(f"Max deployed:    {config.MAX_CAPITAL_DEPLOYED_PCT:.0%} = ${ACCOUNT_EQUITY * config.MAX_CAPITAL_DEPLOYED_PCT:,.0f}",
                          style={"fontFamily": "monospace", "fontSize": "12px"}),
-                html.Div(f"Max positions:   {config.MAX_POSITIONS}",
+                html.Div(f"Max positions:   {config.MAX_POSITIONS}  concurrent",
                          style={"fontFamily": "monospace", "fontSize": "12px"}),
                 html.Div(f"Max portfolio $: ${ACCOUNT_EQUITY * config.RISK_PER_TRADE_PCT * config.MAX_POSITIONS:,.0f} at risk",
                          style={"fontFamily": "monospace", "fontSize": "12px", "color": RED}),
@@ -3070,83 +3407,187 @@ def _overview_layout():
 
 
 # ---------------------------------------------------------------------------
-# Callbacks
+# Callback helpers — build DataTable components for all 4 screener tables
 # ---------------------------------------------------------------------------
 
-@app.callback(
-    Output("tab-content", "children"),
-    Input("tabs", "active_tab"),
-    State("screen-store", "data"),
-    State("trades-store", "data"),
-)
-def render_tab(active_tab, store_data, trades_store):
-    if active_tab == "tab-screener":
-        return _screener_layout()
-    if active_tab == "tab-risk":
-        if store_data:
-            screen_df = pd.DataFrame(store_data)
-        else:
-            screen_df = None
-        return _risk_layout(screen_df)
-    if active_tab == "tab-backtest":
-        return _backtest_layout()
-    if active_tab == "tab-log":
-        return _log_layout()
-    if active_tab == "tab-trades":
-        return _trades_layout()
-    if active_tab == "tab-overview":
-        return _overview_layout()
-    return html.Div("Unknown tab")
+
+def _build_insider_table(df: pd.DataFrame) -> dash_table.DataTable:
+    """Build TABLE 4 — Insider Activity DataTable from the screener DataFrame."""
+    t4_cols = [
+        "Symbol", "Insider", "Ins Score", "Ins Category",
+        "Ins Buys", "Ins Sells", "Ins Net $",
+        "Cluster Buy", "CEO Buy", "Ins Details",
+    ]
+    # Only include columns that actually exist
+    t4_cols = [c for c in t4_cols if c in df.columns]
+    t4_df = df[t4_cols].copy()
+    # Sort: strongest insider signal first (STRONG_BUY > BUY > NEUTRAL > …)
+    _ins_rank = {"STRONG_BUY": 0, "BUY": 1, "NEUTRAL": 2, "CAUTION": 3, "SELL": 4, "—": 5}
+    t4_df = t4_df.sort_values(
+        "Ins Score", ascending=False, na_position="last",
+    ) if "Ins Score" in t4_df.columns else t4_df
+
+    ins_colours = [
+        {"if": {"filter_query": '{Insider} = "STRONG_BUY"', "column_id": "Insider"},
+         "color": GREEN, "fontWeight": "bold"},
+        {"if": {"filter_query": '{Insider} = "BUY"', "column_id": "Insider"},
+         "color": GREEN},
+        {"if": {"filter_query": '{Insider} = "NEUTRAL"', "column_id": "Insider"},
+         "color": MUTED},
+        {"if": {"filter_query": '{Insider} = "CAUTION"', "column_id": "Insider"},
+         "color": ORANGE},
+        {"if": {"filter_query": '{Insider} = "SELL"', "column_id": "Insider"},
+         "color": RED, "fontWeight": "bold"},
+        {"if": {"filter_query": '{CEO Buy} = "YES"', "column_id": "CEO Buy"},
+         "color": GREEN, "fontWeight": "bold"},
+        {"if": {"filter_query": '{Cluster Buy} = "YES"', "column_id": "Cluster Buy"},
+         "color": GREEN, "fontWeight": "bold"},
+        {"if": {"filter_query": '{Ins Score} >= 80', "column_id": "Ins Score"},
+         "color": GREEN, "fontWeight": "bold"},
+        {"if": {"filter_query": '{Ins Score} >= 65 && {Ins Score} < 80', "column_id": "Ins Score"},
+         "color": GREEN},
+        {"if": {"filter_query": '{Ins Score} < 25', "column_id": "Ins Score"},
+         "color": RED, "fontWeight": "bold"},
+        {"if": {"filter_query": '{Ins Score} >= 25 && {Ins Score} < 40', "column_id": "Ins Score"},
+         "color": ORANGE},
+    ]
+
+    return dash_table.DataTable(
+        id="insider-table",
+        columns=[{"name": c, "id": c} for c in t4_df.columns],
+        data=t4_df.to_dict("records"),
+        style_cell={**_CELL_STYLE, "maxWidth": "280px", "overflow": "hidden", "textOverflow": "ellipsis"},
+        style_header=_HDR_STYLE,
+        style_data_conditional=ins_colours,
+        style_table={"overflowX": "auto", "borderRadius": "6px"},
+        sort_action="native",
+        filter_action="native",
+        page_size=40,
+        tooltip_data=[
+            {
+                "Ins Details": {"value": row.get("Ins Details", ""), "type": "markdown"}
+            }
+            for row in t4_df.to_dict("records")
+        ],
+        tooltip_delay=0,
+        tooltip_duration=None,
+    )
 
 
-@app.callback(
-    Output("screen-store",            "data"),
-    Output("screener-table-container","children"),
-    Output("fund-table-container",    "children"),
-    Output("swing-table-container",   "children"),
-    Output("stat-cards",              "children"),
-    Output("refresh-status",          "children"),
-    Output("last-refresh-label",      "children"),
-    Output("ibkr-status-label",       "children"),
-    Input("refresh-btn",              "n_clicks"),
-    prevent_initial_call=True,
-)
-def refresh_screener(n_clicks):
-    """Re-run the screener pipeline and update all three tables + store."""
-    global _last_fetch
+def _build_valuation_table(df: pd.DataFrame) -> dash_table.DataTable:
+    """Build TABLE 5 — Conservative Valuation DataTable from the screener DataFrame."""
+    t5_cols = [
+        "Symbol", "Val Signal", "Val Grade", "Price", "Fair Value", "Buy Below",
+        "Upside", "MoS", "Quality", "FV Low", "FV High",
+        "Impl Growth", "Growth Check", "Moat", "Models",
+    ]
+    t5_cols = [c for c in t5_cols if c in df.columns]
+    t5_df = df[t5_cols].copy()
 
-    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ibkr_ok, ibkr_msg = _check_ibkr_status()
-    ibkr_colour = GREEN if ibkr_ok else YELLOW
+    # Sort: best valuation signals first (DEEP_VALUE > UNDERVALUED > FAIR > …)
+    _val_rank = {
+        "DEEP_VALUE": 0, "UNDERVALUED": 1, "FAIR": 2, "SLIGHTLY_OVER": 3,
+        "OVERVALUED": 4, "EXPENSIVE": 5, "INSUFFICIENT_DATA": 6, "—": 7,
+    }
+    if "Val Signal" in t5_df.columns:
+        t5_df = t5_df.sort_values(
+            "Val Signal",
+            key=lambda s: s.map(lambda x: _val_rank.get(x, 7)),
+            ascending=True,
+        )
 
-    try:
-        records  = fetch_screen_data()
-        df       = _records_to_df(records)
-        _last_fetch = {"records": records, "df": df}
-    except Exception as exc:
-        err = html.Span(f"❌ Error: {exc}", style={"color": RED})
-        no = dash.no_update
-        return no, no, no, no, no, err, f"Last refresh: {ts}", html.Span(ibkr_msg, style={"color": ibkr_colour})
+    val_colours = [
+        # Signal column colour coding
+        {"if": {"filter_query": '{Val Signal} = "DEEP_VALUE"', "column_id": "Val Signal"},
+         "color": GREEN, "fontWeight": "bold"},
+        {"if": {"filter_query": '{Val Signal} = "UNDERVALUED"', "column_id": "Val Signal"},
+         "color": GREEN},
+        {"if": {"filter_query": '{Val Signal} = "FAIR"', "column_id": "Val Signal"},
+         "color": MUTED},
+        {"if": {"filter_query": '{Val Signal} = "SLIGHTLY_OVER"', "column_id": "Val Signal"},
+         "color": ORANGE},
+        {"if": {"filter_query": '{Val Signal} = "OVERVALUED"', "column_id": "Val Signal"},
+         "color": RED},
+        {"if": {"filter_query": '{Val Signal} = "EXPENSIVE"', "column_id": "Val Signal"},
+         "color": RED, "fontWeight": "bold"},
+        # Grade column
+        {"if": {"filter_query": '{Val Grade} = "A"', "column_id": "Val Grade"},
+         "color": GREEN, "fontWeight": "bold"},
+        {"if": {"filter_query": '{Val Grade} = "B"', "column_id": "Val Grade"},
+         "color": GREEN},
+        {"if": {"filter_query": '{Val Grade} = "C"', "column_id": "Val Grade"},
+         "color": MUTED},
+        {"if": {"filter_query": '{Val Grade} = "D"', "column_id": "Val Grade"},
+         "color": ORANGE},
+        {"if": {"filter_query": '{Val Grade} = "F"', "column_id": "Val Grade"},
+         "color": RED, "fontWeight": "bold"},
+        # Upside column — green if positive, red if negative
+        {"if": {"filter_query": '{Upside} contains "+"', "column_id": "Upside"},
+         "color": GREEN, "fontWeight": "bold"},
+        {"if": {"filter_query": '{Upside} contains "-"', "column_id": "Upside"},
+         "color": RED},
+        # Growth reasonableness
+        {"if": {"filter_query": '{Growth Check} = "HEROIC"', "column_id": "Growth Check"},
+         "color": RED, "fontWeight": "bold"},
+        {"if": {"filter_query": '{Growth Check} = "OPTIMISTIC"', "column_id": "Growth Check"},
+         "color": ORANGE},
+        {"if": {"filter_query": '{Growth Check} = "REASONABLE"', "column_id": "Growth Check"},
+         "color": GREEN},
+        {"if": {"filter_query": '{Growth Check} = "CONSERVATIVE"', "column_id": "Growth Check"},
+         "color": GREEN, "fontWeight": "bold"},
+        {"if": {"filter_query": '{Growth Check} contains "NEGATIVE"', "column_id": "Growth Check"},
+         "color": GREEN, "fontWeight": "bold"},
+        # Quality column — highlight HIGH tier
+        {"if": {"filter_query": '{Quality} contains "HIGH"', "column_id": "Quality"},
+         "color": GREEN, "fontWeight": "bold"},
+        {"if": {"filter_query": '{Quality} contains "SPECULATIVE"', "column_id": "Quality"},
+         "color": RED},
+    ]
 
-    hide_internal = ["_is_dip", "_fund_pass", "_ml_ok", "_price"]
+    return dash_table.DataTable(
+        id="valuation-table",
+        columns=[{"name": c, "id": c} for c in t5_df.columns],
+        data=t5_df.to_dict("records"),
+        style_cell={**_CELL_STYLE, "maxWidth": "320px", "overflow": "hidden", "textOverflow": "ellipsis"},
+        style_header=_HDR_STYLE,
+        style_data_conditional=val_colours,
+        style_table={"overflowX": "auto", "borderRadius": "6px"},
+        sort_action="native",
+        filter_action="native",
+        page_size=40,
+        tooltip_data=[
+            {
+                "Models": {"value": row.get("Models", ""), "type": "markdown"},
+                "Moat": {"value": row.get("Moat", ""), "type": "markdown"},
+            }
+            for row in t5_df.to_dict("records")
+        ],
+        tooltip_delay=0,
+        tooltip_duration=None,
+    )
 
-    # ── TABLE 1: Dip Detector — entry signals ────────────────────────────────
-    t1_cols = ["Symbol","Signal","Score","Price","RSI","vs MA50%","vs MA200%",
-               "52wk%","Fund","ML 1W","ML 1M","ML 1Y","ML AUROC","Src"]
+
+def _build_screener_tables(df: pd.DataFrame):
+    """Build all five screener DataTable components + stat cards.
+
+    Returns (t1, t2, t3, t4, t5, stat_cards).
+    """
+    # ── TABLE 1 — Dip Detector + ML ──────────────────────────────────────
+    t1_cols = ["Symbol", "Signal", "Score", "Price", "RSI", "vs MA50%", "vs MA200%",
+               "52wk%", "Fund", "ML 1W", "ML 1M", "ML 1Y", "ML AUROC", "Src"]
     t1_df = df[t1_cols].sort_values(
         "Score", ascending=False,
         key=lambda s: s.str.extract(r"(\d)")[0].astype(float),
     )
     t1 = _make_table(t1_df, "screener-table")
 
-    # ── TABLE 2: Fundamentals ─────────────────────────────────────────────────
-    t2_cols = ["Symbol","Fund","ROIC","FCF Margin","FCF","Cash Conv","D/E","Accruals","AR vs Rev Gr","Revenue","P/E","Signal"]
+    # ── TABLE 2 — Fundamentals ───────────────────────────────────────────
+    t2_cols = ["Symbol", "Fund", "ROIC", "FCF Margin", "FCF", "Cash Conv", "D/E",
+               "Accruals", "AR vs Rev Gr", "Revenue", "P/E", "Signal"]
     t2_df = df[t2_cols].copy()
-
-    # Colour-code ROIC and accruals cells
     fund_colours = [
         {"if": {"filter_query": '{Fund} = "✅"', "column_id": "Fund"}, "color": GREEN, "fontWeight": "bold"},
-        {"if": {"filter_query": '{Fund} = "❌"', "column_id": "Fund"}, "color": RED,   "fontWeight": "bold"},
+        {"if": {"filter_query": '{Fund} = "❌"', "column_id": "Fund"}, "color": RED, "fontWeight": "bold"},
     ]
     t2 = dash_table.DataTable(
         id="fund-table",
@@ -3161,31 +3602,28 @@ def refresh_screener(n_clicks):
         page_size=40,
     )
 
-    # ── TABLE 3: Swing Sell Metrics — sorted by sell pressure ─────────────────
-    t3_cols = ["Symbol","Sell Rec","Sell Score","RSI-14","RSI Sig",
-               "BB%B","BB Sig","MACD Sig","vs MA50","vs MA200",
-               "Stop $","Target $","R/R","Drawdown","Days@Hi","Vol"]
+    # ── TABLE 3 — Swing Sell Metrics ─────────────────────────────────────
+    t3_cols = ["Symbol", "Sell Rec", "Sell Score", "RSI-14", "RSI Sig",
+               "BB%B", "BB Sig", "MACD Sig", "vs MA50", "vs MA200",
+               "Stop $", "Target $", "R/R", "Drawdown", "Days@Hi", "Vol"]
     t3_df = df[t3_cols].copy()
-    # Sort: highest sell score first (numeric sort)
     t3_df = t3_df.sort_values("Sell Score", ascending=False, na_position="last")
-
-    # Colour-code sell recommendation cells
     sell_colours = [
-        {"if": {"filter_query": '{Sell Rec} = "STRONG_SELL"',   "column_id": "Sell Rec"}, "color": RED,    "fontWeight": "bold"},
+        {"if": {"filter_query": '{Sell Rec} = "STRONG_SELL"', "column_id": "Sell Rec"}, "color": RED, "fontWeight": "bold"},
         {"if": {"filter_query": '{Sell Rec} = "CONSIDER_SELL"', "column_id": "Sell Rec"}, "color": ORANGE, "fontWeight": "bold"},
-        {"if": {"filter_query": '{Sell Rec} = "HOLD"',          "column_id": "Sell Rec"}, "color": YELLOW},
-        {"if": {"filter_query": '{Sell Rec} = "ADD"',           "column_id": "Sell Rec"}, "color": GREEN},
-        {"if": {"filter_query": '{RSI Sig} = "OVERBOUGHT"',     "column_id": "RSI Sig"},  "color": RED},
-        {"if": {"filter_query": '{RSI Sig} = "OVERSOLD"',       "column_id": "RSI Sig"},  "color": GREEN},
-        {"if": {"filter_query": '{BB Sig} = "EXTENDED"',        "column_id": "BB Sig"},   "color": RED},
-        {"if": {"filter_query": '{BB Sig} = "COMPRESSED"',      "column_id": "BB Sig"},   "color": GREEN},
+        {"if": {"filter_query": '{Sell Rec} = "HOLD"', "column_id": "Sell Rec"}, "color": YELLOW},
+        {"if": {"filter_query": '{Sell Rec} = "ADD"', "column_id": "Sell Rec"}, "color": GREEN},
+        {"if": {"filter_query": '{RSI Sig} = "OVERBOUGHT"', "column_id": "RSI Sig"}, "color": RED},
+        {"if": {"filter_query": '{RSI Sig} = "OVERSOLD"', "column_id": "RSI Sig"}, "color": GREEN},
+        {"if": {"filter_query": '{BB Sig} = "EXTENDED"', "column_id": "BB Sig"}, "color": RED},
+        {"if": {"filter_query": '{BB Sig} = "COMPRESSED"', "column_id": "BB Sig"}, "color": GREEN},
         {"if": {"filter_query": '{MACD Sig} = "BEARISH_CROSS"', "column_id": "MACD Sig"}, "color": RED},
-        {"if": {"filter_query": '{MACD Sig} = "BULLISH"',       "column_id": "MACD Sig"}, "color": GREEN},
-        {"if": {"filter_query": "{Sell Score} >= 75",           "column_id": "Sell Score"}, "color": RED,   "fontWeight": "bold"},
+        {"if": {"filter_query": '{MACD Sig} = "BULLISH"', "column_id": "MACD Sig"}, "color": GREEN},
+        {"if": {"filter_query": "{Sell Score} >= 75", "column_id": "Sell Score"}, "color": RED, "fontWeight": "bold"},
         {"if": {"filter_query": "{Sell Score} >= 45 && {Sell Score} < 75", "column_id": "Sell Score"}, "color": ORANGE},
-        {"if": {"filter_query": "{Sell Score} < 20",            "column_id": "Sell Score"}, "color": GREEN},
-        {"if": {"filter_query": '{Vol} = "HIGH"',               "column_id": "Vol"},       "color": RED},
-        {"if": {"filter_query": '{Vol} = "LOW"',                "column_id": "Vol"},       "color": GREEN},
+        {"if": {"filter_query": "{Sell Score} < 20", "column_id": "Sell Score"}, "color": GREEN},
+        {"if": {"filter_query": '{Vol} = "HIGH"', "column_id": "Vol"}, "color": RED},
+        {"if": {"filter_query": '{Vol} = "LOW"', "column_id": "Vol"}, "color": GREEN},
     ]
     t3 = dash_table.DataTable(
         id="swing-table",
@@ -3200,43 +3638,239 @@ def refresh_screener(n_clicks):
         page_size=40,
     )
 
-    # ── stat cards ────────────────────────────────────────────────────────────
-    src_counts  = df["Src"].value_counts().to_dict() if "Src" in df.columns else {}
+    # ── TABLE 4 — Insider Activity ───────────────────────────────────────
+    t4 = _build_insider_table(df)
+
+    # ── TABLE 5 — Valuation ──────────────────────────────────────────────
+    t5 = _build_valuation_table(df)
+
+    # ── Stat cards ────────────────────────────────────────────────────────
+    src_counts = df["Src"].value_counts().to_dict() if "Src" in df.columns else {}
     src_summary = "  ".join(f"{src}:{cnt}" for src, cnt in src_counts.items())
-    n_buy   = df["Signal"].str.contains("BUY").sum()
-    n_dip   = df["Signal"].str.contains("DIP").sum()
+    n_buy = df["Signal"].str.contains("BUY").sum()
+    n_dip = df["Signal"].str.contains("DIP").sum()
     n_watch = df["Signal"].str.contains("WATCH").sum()
-    n_strong_sell   = (df["Sell Rec"] == "STRONG_SELL").sum()
-    n_consider_sell = (df["Sell Rec"] == "CONSIDER_SELL").sum()
+    n_strong_sell = (df["Sell Rec"] == "STRONG_SELL").sum() if "Sell Rec" in df.columns else 0
+    n_consider_sell = (df["Sell Rec"] == "CONSIDER_SELL").sum() if "Sell Rec" in df.columns else 0
+    n_insider_buy = (df["Insider"].isin(["STRONG_BUY", "BUY"])).sum() if "Insider" in df.columns else 0
+    n_deep_value = (df["Val Signal"] == "DEEP_VALUE").sum() if "Val Signal" in df.columns else 0
+    n_undervalued = (df["Val Signal"] == "UNDERVALUED").sum() if "Val Signal" in df.columns else 0
+    n_overvalued = (df["Val Signal"].isin(["OVERVALUED", "EXPENSIVE"])).sum() if "Val Signal" in df.columns else 0
 
     stat_cards = dbc.Row([
-        _stat_card("🟢 Buy Signals",    str(n_buy),               GREEN),
-        _stat_card("🟡 Dip Alerts",     str(n_dip),               YELLOW),
-        _stat_card("⚪ Watch",           str(n_watch),             MUTED),
-        _stat_card("🔴 Strong Sell",    str(n_strong_sell),       RED),
-        _stat_card("🟠 Consider Sell",  str(n_consider_sell),     ORANGE),
-        _stat_card("Tickers Scanned",   str(len(df)),             ACCENT),
-        _stat_card("Price Sources",     src_summary or "—",       MUTED),
+        _stat_card("🟢 Buy Signals", str(n_buy), GREEN),
+        _stat_card("🟡 Dip Alerts", str(n_dip), YELLOW),
+        _stat_card("⚪ Watch", str(n_watch), MUTED),
+        _stat_card("� Deep Value", str(n_deep_value), GREEN),
+        _stat_card("📗 Undervalued", str(n_undervalued), GREEN),
+        _stat_card("📕 Overvalued", str(n_overvalued), RED),
+        _stat_card("� Strong Sell", str(n_strong_sell), RED),
+        _stat_card("🕵️ Insider Buy", str(n_insider_buy), GREEN),
+        _stat_card("Tickers Scanned", str(len(df)), ACCENT),
+        _stat_card("Price Sources", src_summary or "—", MUTED),
     ])
+
+    return t1, t2, t3, t4, t5, stat_cards
+
+
+# ---------------------------------------------------------------------------
+# Callback: Tab switching
+# ---------------------------------------------------------------------------
+
+@app.callback(
+    Output("tab-content", "children"),
+    Input("tabs", "active_tab"),
+    State("screen-store", "data"),
+)
+def render_tab(active_tab, screen_data):
+    """Render the selected tab's content."""
+    if active_tab == "tab-screener":
+        return _screener_layout()
+    elif active_tab == "tab-risk":
+        df = pd.DataFrame(screen_data) if screen_data else None
+        return _risk_layout(df)
+    elif active_tab == "tab-backtest":
+        return _backtest_layout()
+    elif active_tab == "tab-log":
+        return _log_layout()
+    elif active_tab == "tab-trades":
+        return _trades_layout()
+    elif active_tab == "tab-overview":
+        return _overview_layout()
+    return html.Div("Select a tab.", style={"color": MUTED})
+
+
+# ---------------------------------------------------------------------------
+# Callback: 🧠 Re-run Model (full pipeline)
+# ---------------------------------------------------------------------------
+
+@app.callback(
+    Output("screen-store", "data"),
+    Output("screener-table-container", "children"),
+    Output("fund-table-container", "children"),
+    Output("swing-table-container", "children"),
+    Output("insider-table-container", "children"),
+    Output("valuation-table-container", "children"),
+    Output("stat-cards", "children"),
+    Output("refresh-status", "children"),
+    Output("last-refresh-label", "children"),
+    Input("refresh-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def run_model(n_clicks):
+    """Full pipeline: fetch data, run ML model, fundamentals, dip scoring, insider analysis, valuation."""
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        records = fetch_screen_data()
+        df = _records_to_df(records)
+        _last_fetch["df"] = df
+        _last_fetch["ts"] = ts
+
+        t1, t2, t3, t4, t5, stat_cards = _build_screener_tables(df)
+
+        return (
+            df.to_dict("records"),
+            t1, t2, t3, t4, t5,
+            stat_cards,
+            html.Span(f"✅ Screener refreshed — {ts}  ({len(df)} tickers)",
+                      style={"color": GREEN}),
+            f"Last model run: {ts}",
+        )
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return (
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            html.Span(f"❌ Model error: {exc}", style={"color": RED}),
+            dash.no_update,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Callback: 📡 Refresh Prices (live prices only, no model re-run)
+# ---------------------------------------------------------------------------
+
+@app.callback(
+    Output("screen-store", "data", allow_duplicate=True),
+    Output("screener-table-container", "children", allow_duplicate=True),
+    Output("fund-table-container", "children", allow_duplicate=True),
+    Output("swing-table-container", "children", allow_duplicate=True),
+    Output("insider-table-container", "children", allow_duplicate=True),
+    Output("valuation-table-container", "children", allow_duplicate=True),
+    Output("stat-cards", "children", allow_duplicate=True),
+    Output("refresh-status", "children", allow_duplicate=True),
+    Output("last-refresh-label", "children", allow_duplicate=True),
+    Input("refresh-prices-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def refresh_prices(n_clicks):
+    """Update only live prices for already-scanned tickers (no model re-run)."""
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    df = _last_fetch.get("df")
+    if df is None or df.empty:
+        return (dash.no_update,) * 7 + (
+            html.Span("⚠️ Run the model first before refreshing prices.",
+                      style={"color": YELLOW}),
+            dash.no_update,
+        )
+
+    try:
+        symbols = df["Symbol"].tolist()
+        fresh_prices = _fetch_current_prices(symbols)
+
+        for idx, row in df.iterrows():
+            sym = row["Symbol"]
+            if sym in fresh_prices:
+                new_price = fresh_prices[sym]
+                df.at[idx, "Price"] = round(new_price, 2)
+
+                # Recalculate price-vs-MA columns if we have the data
+                old_price = row.get("Price")
+                if old_price and old_price > 0 and new_price != old_price:
+                    for ma_col in ["vs MA50%", "vs MA200%"]:
+                        old_val = row.get(ma_col)
+                        if old_val is not None and not pd.isna(old_val):
+                            try:
+                                ma = old_price / (1 + float(old_val) / 100)
+                                df.at[idx, ma_col] = round((new_price - ma) / ma * 100, 1)
+                            except (ZeroDivisionError, TypeError, ValueError):
+                                pass
+
+        _last_fetch["df"] = df
+
+    except Exception as exc:
+        return (dash.no_update,) * 7 + (
+            html.Span(f"❌ Price refresh error: {exc}", style={"color": RED}),
+            dash.no_update,
+        )
+
+    t1, t2, t3, t4, t5, stat_cards = _build_screener_tables(df)
+
+    n_refreshed = sum(1 for s in symbols if s in fresh_prices)
 
     return (
         df.to_dict("records"),
-        t1, t2, t3,
+        t1, t2, t3, t4, t5,
         stat_cards,
-        html.Span(f"✅ Updated {ts}", style={"color": GREEN}),
-        f"Last refresh: {ts}",
-        html.Span(ibkr_msg, style={"color": ibkr_colour}),
+        html.Span(f"📡 Prices updated {ts}  ({n_refreshed}/{len(symbols)} tickers)",
+                  style={"color": GREEN}),
+        f"Last price refresh: {ts}",
     )
 
 
+# ---------------------------------------------------------------------------
+# Callback: 🔄 Refresh Trades (reload CSV + live prices, no model)
+# ---------------------------------------------------------------------------
+
 @app.callback(
-    Output("trades-store",      "data"),
+    Output("trades-store",           "data",     allow_duplicate=True),
+    Input("refresh-trades-btn",      "n_clicks"),
+    prevent_initial_call=True,
+)
+def refresh_trades_tab(n_clicks):
+    """Reload the trade journal CSV and trigger re-render of the My Trades tab."""
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        df = _load_trades()
+        n = len(df)
+        return {"refreshed_at": ts, "status": f"✅ Trades reloaded ({n} entries) — {ts}", "ok": True}
+    except Exception as exc:
+        return {"refreshed_at": ts, "status": f"❌ Error reloading trades: {exc}", "ok": False}
+
+
+# ---------------------------------------------------------------------------
+# Callback: Auto-refresh trades tab when trades-store changes
+# (triggered by save_trade OR refresh_trades_tab writing to trades-store)
+# ---------------------------------------------------------------------------
+
+@app.callback(
+    Output("tab-content", "children", allow_duplicate=True),
+    Input("trades-store", "data"),
+    State("tabs", "active_tab"),
+    prevent_initial_call=True,
+)
+def auto_refresh_trades_tab(trades_data, active_tab):
+    """Re-render the trades tab whenever the trades store is updated.
+
+    This fires after save_trade (logging a new trade) or refresh_trades_tab
+    (manual refresh button), so the user sees updated data immediately
+    without switching tabs or doing a full model re-run.
+    """
+    if active_tab != "tab-trades":
+        return dash.no_update
+    return _trades_layout(trades_data=trades_data)
+
+
+@app.callback(
+    Output("trades-store",      "data",     allow_duplicate=True),
     Output("trade-save-status", "children"),
-    Output("trade-symbol",      "value"),
-    Output("trade-qty",         "value"),
-    Output("trade-entry",       "value"),
-    Output("trade-exit",        "value"),
-    Output("trade-notes",       "value"),
     Input("save-trade-btn",     "n_clicks"),
     State("trade-date",         "value"),
     State("trade-symbol",       "value"),
@@ -3249,7 +3883,7 @@ def refresh_screener(n_clicks):
     prevent_initial_call=True,
 )
 def save_trade(n_clicks, date, symbol, asset_type, action, qty, entry, exit_p, notes):
-    """Validate inputs, auto-calculate P&L, append to CSV, refresh display."""
+    """Validate inputs, auto-calculate P&L, append to CSV, trigger trades tab refresh."""
     errors = []
     if not symbol or not str(symbol).strip():
         errors.append("Symbol is required.")
@@ -3258,10 +3892,10 @@ def save_trade(n_clicks, date, symbol, asset_type, action, qty, entry, exit_p, n
     if not entry or float(entry) <= 0:
         errors.append("Entry Price must be > 0.")
     if errors:
+        # Don't update trades-store (no tab re-render) — just show error inline
         return (
             dash.no_update,
             html.Span("⚠️ " + "  ".join(errors), style={"color": YELLOW}),
-            dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update,
         )
 
     qty_f    = float(qty)
@@ -3294,19 +3928,16 @@ def save_trade(n_clicks, date, symbol, asset_type, action, qty, entry, exit_p, n
 
     type_label = "📦 ETF" if resolved_type == "ETF" else "📈 Stock"
     pnl_msg = f"  →  P&L: ${realized:+,.2f}" if realized is not None else ""
-    status_msg = html.Span(
-        f"✅ Saved {row['action']} {qty_f:.0f}x {sym_upper} ({type_label}) @ ${entry_f:.2f}{pnl_msg}",
-        style={"color": GREEN},
-    )
-    # Return a timestamp as store data to trigger re-render of trades tab
+    status_text = f"✅ Saved {row['action']} {qty_f:.0f}x {sym_upper} ({type_label}) @ ${entry_f:.2f}{pnl_msg}"
+
+    # Return save details to trades-store — triggers auto_refresh_trades_tab
     return (
-        {"saved_at": datetime.datetime.now().isoformat()},
-        status_msg,
-        "",    # clear symbol
-        None,  # clear qty
-        None,  # clear entry
-        None,  # clear exit
-        "",    # clear notes
+        {
+            "saved_at": datetime.datetime.now().isoformat(),
+            "status": status_text,
+            "ok": True,
+        },
+        html.Span(status_text, style={"color": GREEN}),
     )
 
 
