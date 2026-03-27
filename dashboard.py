@@ -381,7 +381,7 @@ def fetch_screen_data() -> list[dict]:
                     try:
                         from valuation import valuate
                         # Resolve current price and shares outstanding
-                        _val_price = round(s.price, 2) if s else info.get("latestPrice")
+                        _val_price = round(signal.price, 2) if signal else info.get("latestPrice")
                         _val_shares = info.get("sharesOutstanding")
                         if _val_price and _val_price > 0 and info:
                             val_result = valuate(
@@ -928,6 +928,7 @@ app.layout = html.Div(
                 dbc.Tab(label="📈  Back-test",      tab_id="tab-backtest"),
                 dbc.Tab(label="🗂  Screen Log",     tab_id="tab-log"),
                 dbc.Tab(label="📒  My Trades",      tab_id="tab-trades"),
+                dbc.Tab(label="💎  Valuation",      tab_id="tab-valuation"),
                 dbc.Tab(label="🏠  System Overview", tab_id="tab-overview"),
             ], style={"marginBottom": "20px"}),
 
@@ -2980,7 +2981,428 @@ def _trades_layout(trades_data=None):
 
 
 # ---------------------------------------------------------------------------
-# Tab 6 — System Overview (portfolio / system health)
+# Tab 6 — 💎 Valuation (dedicated deep-dive)
+# ---------------------------------------------------------------------------
+
+def _valuation_tab_layout():
+    """Build the dedicated Valuation tab — deep-dive into multi-model intrinsic value.
+
+    Sections:
+      1. Summary stat cards (signal distribution, avg upside, quality breakdown)
+      2. Main valuation table (enhanced TABLE 5)
+      3. Fair-value range chart (price vs FV low/median/high per ticker)
+      4. Implied-growth diagnostic chart (what the market is pricing in)
+      5. Per-ticker model breakdown table (each model's FV, weight, notes)
+      6. Quality & moat overview
+    """
+    records = _last_fetch.get("records", [])
+    df = _last_fetch.get("df")
+    ts = _last_fetch.get("ts", "—")
+
+    if df is None or df.empty:
+        return html.Div([
+            _card([
+                html.H4("💎 Conservative Multi-Model Valuation",
+                        style={"color": ACCENT, "fontFamily": "monospace"}),
+                html.Div("No data yet — run the screener first (📡 Re-run Model button on Screener tab).",
+                         style={"color": MUTED, "fontFamily": "monospace", "fontSize": "14px"}),
+            ]),
+        ])
+
+    # ── Extract valuation objects from records ────────────────────────────
+    val_data = []
+    for r in records:
+        val = r.get("valuation")
+        if val is not None:
+            val_data.append(val)
+
+    # ── 1. SUMMARY STAT CARDS ────────────────────────────────────────────
+    n_total = len(val_data)
+    n_deep = sum(1 for v in val_data if v.valuation_signal == "DEEP_VALUE")
+    n_under = sum(1 for v in val_data if v.valuation_signal == "UNDERVALUED")
+    n_fair = sum(1 for v in val_data if v.valuation_signal == "FAIR")
+    n_over = sum(1 for v in val_data if v.valuation_signal in ("OVERVALUED", "SLIGHTLY_OVER"))
+    n_expensive = sum(1 for v in val_data if v.valuation_signal == "EXPENSIVE")
+    n_insufficient = sum(1 for v in val_data if v.valuation_signal == "INSUFFICIENT_DATA")
+
+    upsides = [v.upside_pct for v in val_data if v.upside_pct is not None]
+    avg_upside = sum(upsides) / len(upsides) if upsides else 0
+    median_upside = sorted(upsides)[len(upsides) // 2] if upsides else 0
+
+    n_high_q = sum(1 for v in val_data if v.quality_tier == "HIGH")
+    n_med_q = sum(1 for v in val_data if v.quality_tier == "MEDIUM")
+    n_spec_q = sum(1 for v in val_data if v.quality_tier == "SPECULATIVE")
+
+    avg_mos = sum(v.margin_of_safety_pct for v in val_data) / len(val_data) * 100 if val_data else 0
+
+    stat_row = dbc.Row([
+        _stat_card("Tickers Valued", str(n_total), ACCENT),
+        _stat_card("💎 Deep Value", str(n_deep), GREEN),
+        _stat_card("📗 Undervalued", str(n_under), GREEN),
+        _stat_card("⚖️ Fair", str(n_fair), MUTED),
+        _stat_card("📙 Overvalued", str(n_over), YELLOW),
+        _stat_card("📕 Expensive", str(n_expensive), RED),
+        _stat_card("⚠️ No Data", str(n_insufficient), MUTED),
+    ], className="mb-3")
+
+    stat_row2 = dbc.Row([
+        _stat_card("Avg Upside", f"{avg_upside:+.1f}%", GREEN if avg_upside > 0 else RED),
+        _stat_card("Median Upside", f"{median_upside:+.1f}%", GREEN if median_upside > 0 else RED),
+        _stat_card("Avg MoS Applied", f"{avg_mos:.0f}%", ACCENT),
+        _stat_card("🏆 High Quality", str(n_high_q), GREEN),
+        _stat_card("🔵 Medium Quality", str(n_med_q), MUTED),
+        _stat_card("🔴 Speculative", str(n_spec_q), RED),
+    ], className="mb-3")
+
+    # ── 2. MAIN VALUATION TABLE (enhanced TABLE 5) ───────────────────────
+    if "Val Signal" in df.columns:
+        val_table_content = _build_valuation_table(df)
+    else:
+        val_table_content = html.Div(
+            "No valuation data in current screener run.",
+            style={"color": MUTED, "fontFamily": "monospace"},
+        )
+
+    val_table_card = _card([
+        html.H6("📊 Valuation Summary — All Tickers",
+                style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+        html.Div(
+            "8 independent models: Two-Stage DCF · Reverse DCF · Earnings Power (Greenwald) · "
+            "Graham Number · Excess Returns (Penman) · DDM · Relative P/E · Asset Floor.  "
+            "Fair Value = weighted median.  Buy Below = Fair Value × (1 − Margin of Safety).  "
+            "Sorted by valuation attractiveness.",
+            style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+        ),
+        val_table_content,
+    ])
+
+    # ── 3. FAIR-VALUE RANGE CHART ────────────────────────────────────────
+    fv_chart_card = _build_fv_range_chart(val_data)
+
+    # ── 4. IMPLIED-GROWTH DIAGNOSTIC CHART ───────────────────────────────
+    growth_chart_card = _build_implied_growth_chart(val_data)
+
+    # ── 5. PER-TICKER MODEL BREAKDOWN TABLE ──────────────────────────────
+    model_breakdown_card = _build_model_breakdown_table(val_data)
+
+    # ── 6. QUALITY & MOAT OVERVIEW ───────────────────────────────────────
+    quality_card = _build_quality_overview(val_data)
+
+    # ── Header ────────────────────────────────────────────────────────────
+    header = _card([
+        html.H4("💎 Conservative Multi-Model Valuation",
+                style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "6px"}),
+        html.Div(
+            "A Damodaran/Greenwald/Penman/Graham-inspired engine.  Every model uses pessimistic "
+            "assumptions — lower growth, higher discount rates, shorter horizons than Morningstar.  "
+            "The composite fair value is the WEIGHTED MEDIAN of 8 independent models.  "
+            "Margin of Safety is tiered by company quality: 25% (high) / 35% (medium) / 50% (speculative).",
+            style={"color": TEXT, "fontSize": "12px", "fontFamily": "monospace", "lineHeight": "1.7"},
+        ),
+        html.Div(f"Last refresh: {ts}",
+                 style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginTop": "6px"}),
+    ])
+
+    return html.Div([
+        header,
+        stat_row,
+        stat_row2,
+        val_table_card,
+        dbc.Row([
+            dbc.Col(fv_chart_card, md=6),
+            dbc.Col(growth_chart_card, md=6),
+        ]),
+        quality_card,
+        model_breakdown_card,
+    ])
+
+
+def _build_fv_range_chart(val_data: list) -> dbc.Card:
+    """Build a horizontal bar chart showing fair-value range vs current price per ticker."""
+    items = [
+        v for v in val_data
+        if v.fair_value and v.fair_value > 0 and v.current_price and v.current_price > 0
+    ]
+    if not items:
+        return _card([
+            html.H6("📈 Fair Value Ranges", style={"color": ACCENT, "fontFamily": "monospace"}),
+            html.Div("No fair-value data available.", style={"color": MUTED, "fontFamily": "monospace"}),
+        ])
+
+    # Sort by upside (most undervalued first)
+    items.sort(key=lambda v: v.upside_pct or 0, reverse=True)
+
+    symbols = [v.symbol for v in items]
+    prices = [v.current_price for v in items]
+    fv_lows = [v.fair_value_low or v.fair_value * 0.85 for v in items]
+    fv_mids = [v.fair_value for v in items]
+    fv_highs = [v.fair_value_high or v.fair_value * 1.15 for v in items]
+    buy_prices = [v.buy_price or v.fair_value * 0.70 for v in items]
+
+    fig = go.Figure()
+
+    # FV range band (low → high)
+    fig.add_trace(go.Bar(
+        y=symbols, x=[h - l for l, h in zip(fv_lows, fv_highs)],
+        base=fv_lows, orientation="h",
+        marker_color="rgba(100,100,100,0.15)",
+        name="FV Range (25th–75th)",
+        hovertemplate="%{y}: $%{base:.0f} – $%{x:.0f}<extra>FV Range</extra>",
+    ))
+
+    # Fair Value dot
+    fig.add_trace(go.Scatter(
+        y=symbols, x=fv_mids, mode="markers",
+        marker=dict(color=ACCENT, size=10, symbol="diamond"),
+        name="Fair Value (median)",
+        hovertemplate="%{y}: Fair Value $%{x:,.2f}<extra></extra>",
+    ))
+
+    # Buy Below price dot
+    fig.add_trace(go.Scatter(
+        y=symbols, x=buy_prices, mode="markers",
+        marker=dict(color=GREEN, size=8, symbol="triangle-left"),
+        name="Buy Below",
+        hovertemplate="%{y}: Buy Below $%{x:,.2f}<extra></extra>",
+    ))
+
+    # Current price dot
+    fig.add_trace(go.Scatter(
+        y=symbols, x=prices, mode="markers",
+        marker=dict(color=RED, size=10, symbol="x"),
+        name="Current Price",
+        hovertemplate="%{y}: Price $%{x:,.2f}<extra></extra>",
+    ))
+
+    fig.update_layout(
+        title=None,
+        height=max(250, len(items) * 36),
+        margin=dict(l=80, r=20, t=10, b=30),
+        paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+        font=dict(family="monospace", size=11, color=TEXT),
+        xaxis=dict(title="$ per share", gridcolor=BORDER),
+        yaxis=dict(autorange="reversed"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        barmode="overlay",
+    )
+
+    return _card([
+        html.H6("📈 Fair Value Ranges vs Current Price",
+                style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+        html.Div("◆ Fair Value  ◁ Buy Below  ✕ Current Price  ░ FV Range (25th–75th pctile)",
+                 style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "6px"}),
+        dcc.Graph(figure=fig, config={"displayModeBar": False}),
+    ])
+
+
+def _build_implied_growth_chart(val_data: list) -> dbc.Card:
+    """Build a scatter chart: implied growth rate per ticker, colour-coded by reasonableness."""
+    items = [
+        v for v in val_data
+        if v.implied_growth_rate is not None
+    ]
+    if not items:
+        return _card([
+            html.H6("🔮 Implied Growth Diagnostic", style={"color": ACCENT, "fontFamily": "monospace"}),
+            html.Div("No reverse-DCF data available.", style={"color": MUTED, "fontFamily": "monospace"}),
+        ])
+
+    colour_map = {
+        "HEROIC": RED,
+        "OPTIMISTIC": ORANGE,
+        "REASONABLE": MUTED,
+        "CONSERVATIVE": GREEN,
+    }
+
+    symbols = [v.symbol for v in items]
+    rates = [v.implied_growth_rate * 100 for v in items]
+    colours = [colour_map.get(v.growth_reasonableness, MUTED) for v in items]
+    reasonableness = [v.growth_reasonableness for v in items]
+
+    fig = go.Figure()
+
+    # Threshold bands
+    fig.add_hrect(y0=20, y1=50, fillcolor="rgba(196,30,30,0.06)", line_width=0,
+                  annotation_text="HEROIC (>20%)", annotation_position="top left")
+    fig.add_hrect(y0=12, y1=20, fillcolor="rgba(122,122,122,0.06)", line_width=0,
+                  annotation_text="OPTIMISTIC (12–20%)", annotation_position="top left")
+    fig.add_hrect(y0=5, y1=12, fillcolor="rgba(150,150,150,0.04)", line_width=0,
+                  annotation_text="REASONABLE (5–12%)", annotation_position="top left")
+    fig.add_hrect(y0=-10, y1=5, fillcolor="rgba(90,90,90,0.04)", line_width=0,
+                  annotation_text="CONSERVATIVE (<5%)", annotation_position="top left")
+
+    fig.add_trace(go.Scatter(
+        x=symbols, y=rates, mode="markers+text",
+        marker=dict(color=colours, size=14, line=dict(width=1, color=BORDER)),
+        text=[f"{r:.1f}%" for r in rates],
+        textposition="top center",
+        textfont=dict(size=10),
+        hovertemplate="%{x}: implied growth %{y:.1f}%%<br>Assessment: %{customdata}<extra></extra>",
+        customdata=reasonableness,
+    ))
+
+    fig.update_layout(
+        height=350,
+        margin=dict(l=40, r=20, t=10, b=40),
+        paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+        font=dict(family="monospace", size=11, color=TEXT),
+        xaxis=dict(title="Ticker", gridcolor=BORDER),
+        yaxis=dict(title="Implied FCF Growth (%)", gridcolor=BORDER, zeroline=True, zerolinecolor=ACCENT),
+        showlegend=False,
+    )
+
+    return _card([
+        html.H6("🔮 Reverse DCF — What Growth Is the Market Pricing In?",
+                style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+        html.Div("If the market implies >15% FCF growth for 5+ years, the stock is priced for perfection.",
+                 style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "6px"}),
+        dcc.Graph(figure=fig, config={"displayModeBar": False}),
+    ])
+
+
+def _build_model_breakdown_table(val_data: list) -> dbc.Card:
+    """Build a detailed per-model breakdown table for every ticker."""
+    rows = []
+    for v in val_data:
+        if not v.models:
+            continue
+        for m in v.models:
+            fv_str = f"${m.fair_value_per_share:,.2f}" if m.fair_value_per_share and m.fair_value_per_share > 0 else "—"
+            status = "✅" if m.fair_value_per_share and m.fair_value_per_share > 0 else "⚠️"
+            error_or_notes = m.notes if not m.error else f"❌ {m.error}"
+            rows.append({
+                "Symbol": v.symbol,
+                "Model": m.model_name.replace("_", " ").title(),
+                "Fair Value": fv_str,
+                "Weight": f"{m.weight:.1f}",
+                "Status": status,
+                "Notes": error_or_notes,
+            })
+
+    if not rows:
+        return _card([
+            html.H6("🔬 Model Breakdown (Per Ticker)", style={"color": ACCENT, "fontFamily": "monospace"}),
+            html.Div("No model data available.", style={"color": MUTED, "fontFamily": "monospace"}),
+        ])
+
+    breakdown_df = pd.DataFrame(rows)
+
+    model_colours = [
+        {"if": {"filter_query": '{Status} = "✅"', "column_id": "Status"}, "color": GREEN},
+        {"if": {"filter_query": '{Status} = "⚠️"', "column_id": "Status"}, "color": YELLOW},
+        {"if": {"filter_query": '{Model} = "Dcf Two Stage"', "column_id": "Model"},
+         "fontWeight": "bold"},
+        {"if": {"filter_query": '{Model} = "Epv"', "column_id": "Model"},
+         "fontWeight": "bold"},
+    ]
+
+    table = dash_table.DataTable(
+        id="valuation-model-breakdown-table",
+        columns=[{"name": c, "id": c} for c in breakdown_df.columns],
+        data=breakdown_df.to_dict("records"),
+        style_cell={**_CELL_STYLE, "maxWidth": "450px", "overflow": "hidden", "textOverflow": "ellipsis"},
+        style_header=_HDR_STYLE,
+        style_data_conditional=model_colours,
+        style_table={"overflowX": "auto", "borderRadius": "6px"},
+        sort_action="native",
+        filter_action="native",
+        page_size=50,
+        tooltip_data=[
+            {"Notes": {"value": row.get("Notes", ""), "type": "markdown"}}
+            for row in breakdown_df.to_dict("records")
+        ],
+        tooltip_delay=0,
+        tooltip_duration=None,
+    )
+
+    return _card([
+        html.H6("🔬 Model Breakdown — All 8 Models × All Tickers",
+                style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+        html.Div(
+            "Each row shows one model's output for one ticker. Filter by Symbol or Model to focus.  "
+            "Weight = influence on composite fair value.  Hover Notes for full detail.",
+            style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+        ),
+        table,
+    ])
+
+
+def _build_quality_overview(val_data: list) -> dbc.Card:
+    """Build a quality & moat summary card for each ticker."""
+    rows = []
+    for v in val_data:
+        moat_str = ", ".join(v.moat_indicators[:5]) if v.moat_indicators else "None detected"
+        rows.append({
+            "Symbol": v.symbol,
+            "Quality Score": f"{v.quality_score:.0f}/100",
+            "Tier": v.quality_tier,
+            "MoS Applied": f"{v.margin_of_safety_pct:.0%}",
+            "Val Signal": v.valuation_signal,
+            "Grade": v.valuation_grade,
+            "Moat Indicators": moat_str,
+        })
+
+    if not rows:
+        return _card([
+            html.H6("🏰 Quality & Moat Overview", style={"color": ACCENT, "fontFamily": "monospace"}),
+            html.Div("No quality data available.", style={"color": MUTED, "fontFamily": "monospace"}),
+        ])
+
+    quality_df = pd.DataFrame(rows)
+
+    # Sort by quality score descending
+    quality_df["_sort"] = quality_df["Quality Score"].str.extract(r"(\d+)").astype(float)
+    quality_df = quality_df.sort_values("_sort", ascending=False).drop(columns=["_sort"])
+
+    q_colours = [
+        {"if": {"filter_query": '{Tier} = "HIGH"', "column_id": "Tier"},
+         "color": GREEN, "fontWeight": "bold"},
+        {"if": {"filter_query": '{Tier} = "MEDIUM"', "column_id": "Tier"},
+         "color": MUTED},
+        {"if": {"filter_query": '{Tier} = "SPECULATIVE"', "column_id": "Tier"},
+         "color": RED, "fontWeight": "bold"},
+        {"if": {"filter_query": '{Val Signal} = "DEEP_VALUE"', "column_id": "Val Signal"},
+         "color": GREEN, "fontWeight": "bold"},
+        {"if": {"filter_query": '{Val Signal} = "UNDERVALUED"', "column_id": "Val Signal"},
+         "color": GREEN},
+        {"if": {"filter_query": '{Val Signal} = "EXPENSIVE"', "column_id": "Val Signal"},
+         "color": RED, "fontWeight": "bold"},
+        {"if": {"filter_query": '{Val Signal} = "OVERVALUED"', "column_id": "Val Signal"},
+         "color": RED},
+        {"if": {"filter_query": '{Grade} = "A"', "column_id": "Grade"},
+         "color": GREEN, "fontWeight": "bold"},
+        {"if": {"filter_query": '{Grade} = "F"', "column_id": "Grade"},
+         "color": RED, "fontWeight": "bold"},
+    ]
+
+    table = dash_table.DataTable(
+        id="valuation-quality-table",
+        columns=[{"name": c, "id": c} for c in quality_df.columns],
+        data=quality_df.to_dict("records"),
+        style_cell={**_CELL_STYLE, "maxWidth": "400px", "overflow": "hidden", "textOverflow": "ellipsis"},
+        style_header=_HDR_STYLE,
+        style_data_conditional=q_colours,
+        style_table={"overflowX": "auto", "borderRadius": "6px"},
+        sort_action="native",
+        filter_action="native",
+        page_size=40,
+    )
+
+    return _card([
+        html.H6("🏰 Quality & Moat Overview — Margin of Safety Tiering",
+                style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
+        html.Div(
+            "Quality score (0–100) drives the margin of safety applied: HIGH ≥70 → 25% MoS  |  "
+            "MEDIUM ≥45 → 35% MoS  |  SPECULATIVE <45 → 50% MoS.  "
+            "Moat indicators from ROIC, FCF margins, leverage, accruals, ROE.",
+            style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
+        ),
+        table,
+    ])
+
+
+# ---------------------------------------------------------------------------
+# Tab 7 — System Overview (portfolio / system health)
 # ---------------------------------------------------------------------------
 
 def _overview_layout():
@@ -3695,6 +4117,8 @@ def render_tab(active_tab, screen_data):
         return _log_layout()
     elif active_tab == "tab-trades":
         return _trades_layout()
+    elif active_tab == "tab-valuation":
+        return _valuation_tab_layout()
     elif active_tab == "tab-overview":
         return _overview_layout()
     return html.Div("Select a tab.", style={"color": MUTED})
@@ -3725,6 +4149,7 @@ def run_model(n_clicks):
         df = _records_to_df(records)
         _last_fetch["df"] = df
         _last_fetch["ts"] = ts
+        _last_fetch["records"] = records
 
         t1, t2, t3, t4, t5, stat_cards = _build_screener_tables(df)
 
