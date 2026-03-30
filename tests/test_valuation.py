@@ -245,8 +245,8 @@ class TestRelativePE:
     def test_conservative_pe_cap(self):
         info = _high_quality_info()
         result = _relative_pe(info, 2e9)
-        # Target P/E should never exceed 18x
-        assert result.inputs["target_pe"] <= 18.0
+        # Target P/E should never exceed 25x (realistic cap for quality growers)
+        assert result.inputs["target_pe"] <= 25.0
 
 
 class TestAssetFloor:
@@ -327,12 +327,12 @@ class TestCompositeValuation:
         # High quality → lower MoS
         info = _high_quality_info()
         result = valuate("HQ", info, current_price=100.0, shares_outstanding=2e9)
-        assert result.margin_of_safety_pct <= 0.30  # high quality = 25%
+        assert result.margin_of_safety_pct <= 0.25  # high quality = 20%
 
         # Speculative → higher MoS
         info2 = _speculative_info()
         result2 = valuate("LQ", info2, current_price=10.0, shares_outstanding=5e8)
-        assert result2.margin_of_safety_pct >= 0.45  # speculative = 50%
+        assert result2.margin_of_safety_pct >= 0.35  # speculative = 40%
 
     def test_model_count(self):
         info = _high_quality_info()

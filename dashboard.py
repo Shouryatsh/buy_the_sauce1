@@ -1031,8 +1031,8 @@ def _screener_layout():
             html.Div(
                 "8 independent models: Two-Stage DCF, Reverse DCF, Earnings Power (Greenwald), "
                 "Graham Number, Excess Returns (Penman), DDM, Relative P/E, Asset Floor.  "
-                "Fair Value = weighted median.  Buy Below = Fair Value × (1 − Margin of Safety).  "
-                "More conservative than Morningstar: higher discount rates, lower growth, shorter horizons.",
+                "Fair Value = weighted median.  Buy Below = Fair Value × (1 − MoS).  "
+                "Realistic assumptions: 70% of trailing growth, 8%+ WACC, 7-yr horizon.  MoS: 20/30/40%.",
                 style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "10px"},
             ),
             html.Div(id="valuation-table-container",
@@ -3093,10 +3093,10 @@ def _valuation_tab_layout():
         html.H4("💎 Conservative Multi-Model Valuation",
                 style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "6px"}),
         html.Div(
-            "A Damodaran/Greenwald/Penman/Graham-inspired engine.  Every model uses pessimistic "
-            "assumptions — lower growth, higher discount rates, shorter horizons than Morningstar.  "
-            "The composite fair value is the WEIGHTED MEDIAN of 8 independent models.  "
-            "Margin of Safety is tiered by company quality: 25% (high) / 35% (medium) / 50% (speculative).",
+            "A Damodaran/Greenwald/Penman/Graham-inspired engine.  Each model uses realistic "
+            "assumptions — 70% of trailing growth for 7 yr, 8%+ WACC, 2.5% terminal growth — "
+            "conservative but not punitive.  Fair value is the WEIGHTED MEDIAN of 8 independent models.  "
+            "Margin of Safety is tiered by company quality: 20% (high) / 30% (medium) / 40% (speculative).",
             style={"color": TEXT, "fontSize": "12px", "fontFamily": "monospace", "lineHeight": "1.7"},
         ),
         html.Div(f"Last refresh: {ts}",
@@ -3254,7 +3254,7 @@ def _build_implied_growth_chart(val_data: list) -> dbc.Card:
     return _card([
         html.H6("🔮 Reverse DCF — What Growth Is the Market Pricing In?",
                 style={"color": ACCENT, "fontFamily": "monospace", "marginBottom": "4px"}),
-        html.Div("If the market implies >15% FCF growth for 5+ years, the stock is priced for perfection.",
+        html.Div("If the market implies >15% FCF growth for 7+ years, the stock is priced for perfection.",
                  style={"color": MUTED, "fontSize": "11px", "fontFamily": "monospace", "marginBottom": "6px"}),
         dcc.Graph(figure=fig, config={"displayModeBar": False}),
     ])

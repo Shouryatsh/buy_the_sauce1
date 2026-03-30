@@ -10,13 +10,14 @@ Implements a multi-model valuation framework inspired by:
 
 Design principles
 -----------------
-  1. **Conservative by default**: Every model uses pessimistic assumptions.
-     Where Morningstar picks base-case growth, we use 1/2 to 2/3 of that.
+  1. **Realistic, not punitive**: Each model uses a single layer of conservatism
+     (e.g. 70% of trailing growth, realistic WACC) rather than stacking multiple
+     haircuts that compound into unrealistically low values.
   2. **Multiple independent models**: No single model drives the output.
-     The final fair value is a WEIGHTED MEDIAN of 5+ models, each with its
+     The final fair value is a WEIGHTED MEDIAN of all 8 models, each with its
      own lens (cash flow, earnings, assets, relative).
   3. **Margin of safety**: The "buy price" is fair-value × (1 − margin_of_safety).
-     Default MoS = 30% for high-quality, 40% for medium, 50% for speculative.
+     MoS = 20% HIGH / 30% MEDIUM / 40% SPECULATIVE — applied once on a realistic base.
   4. **Transparent**: Every model's output and inputs are returned for display.
 
 Models implemented
@@ -52,21 +53,21 @@ logger = logging.getLogger(__name__)
 # WACC / discount rate assumptions
 # Morningstar uses company-specific WACC (often 7-9% for large caps).
 # We use a HIGHER discount rate to be conservative.
-DEFAULT_RISK_FREE_RATE: float = 0.043       # ~10Y US Treasury yield (conservative)
+DEFAULT_RISK_FREE_RATE: float = 0.043       # ~10Y US Treasury yield
 DEFAULT_EQUITY_RISK_PREMIUM: float = 0.055  # Damodaran's 2024 ERP for US
 DEFAULT_BETA_FLOOR: float = 0.8             # never assume beta < 0.8
 DEFAULT_BETA_CAP: float = 2.0               # cap at 2.0
 DEFAULT_COST_OF_DEBT: float = 0.055         # after-tax cost of debt assumption
 DEFAULT_TAX_RATE: float = 0.21              # US corporate tax rate
-WACC_FLOOR: float = 0.09                    # never use WACC below 9%
+WACC_FLOOR: float = 0.08                    # floor at 8% — reasonable for investment-grade large caps
 WACC_CAP: float = 0.16                      # cap at 16%
 
-# Growth assumptions — THESE ARE THE KEY CONSERVATISM LEVERS
-# Morningstar issue: they often project 5-15% growth for 5-10 years.
-# We cap high-growth at 2/3 of trailing growth, and fade to terminal faster.
-MAX_HIGH_GROWTH_RATE: float = 0.12          # never assume > 12% revenue growth
-HIGH_GROWTH_HAIRCUT: float = 0.60           # use 60% of trailing growth (Morningstar uses ~80-100%)
-HIGH_GROWTH_YEARS: int = 5                  # only 5 years of above-average growth
+# Growth assumptions — calibrated to be conservative but realistic
+# Morningstar base-case: 80-100% of trailing growth for 5-10 years.
+# We use 70% of trailing growth for 7 years — still cautious but not punitive.
+MAX_HIGH_GROWTH_RATE: float = 0.15          # cap at 15% (Morningstar uses 25%+ for tech)
+HIGH_GROWTH_HAIRCUT: float = 0.70           # use 70% of trailing growth
+HIGH_GROWTH_YEARS: int = 7                  # 7 years of above-average growth (industry standard)
 TERMINAL_GROWTH_RATE: float = 0.025         # long-run GDP growth (2.5%) — Damodaran standard
 TERMINAL_GROWTH_CAP: float = 0.03           # terminal growth never exceeds 3%
 # For negative/zero growth companies, assume 0% in high-growth phase
@@ -77,20 +78,21 @@ FCF_TO_REVENUE_FLOOR: float = 0.03          # assume at least 3% FCF margin
 FCF_TO_REVENUE_CAP: float = 0.30            # cap at 30% FCF margin
 
 # Margin of safety (Buffett/Graham concept)
-MARGIN_OF_SAFETY_HIGH_QUALITY: float = 0.25  # 25% MoS for best companies
-MARGIN_OF_SAFETY_MEDIUM: float = 0.35        # 35% MoS for average companies
-MARGIN_OF_SAFETY_SPECULATIVE: float = 0.50   # 50% MoS for low-quality / high-uncertainty
+# Applied AFTER realistic fair value — these are the primary safety buffer.
+MARGIN_OF_SAFETY_HIGH_QUALITY: float = 0.20  # 20% MoS for best companies
+MARGIN_OF_SAFETY_MEDIUM: float = 0.30        # 30% MoS for average companies
+MARGIN_OF_SAFETY_SPECULATIVE: float = 0.40   # 40% MoS for low-quality / high-uncertainty
 
 # Model weights for composite valuation
-# Higher weight = more influence on final fair value
+# Balanced: no single model dominates; cash-flow models get modest priority
 MODEL_WEIGHTS = {
-    "dcf_two_stage":      3.0,   # primary model
-    "reverse_dcf":        1.0,   # diagnostic (not direct valuation)
-    "epv":                2.5,   # earnings power value — very conservative
-    "graham_number":      1.5,   # classic margin-of-safety
+    "dcf_two_stage":      2.5,   # primary cash-flow model
+    "reverse_dcf":        1.0,   # diagnostic — realistic fair-value sanity check
+    "epv":                1.5,   # zero-growth earnings power — lower-bound anchor
+    "graham_number":      1.5,   # Graham's original formula
     "excess_returns":     2.0,   # residual income / economic profit
-    "ddm":                1.0,   # only if dividend-paying
-    "relative_pe":        1.5,   # sector-relative
+    "ddm":                1.5,   # dividend/FCF yield model
+    "relative_pe":        2.0,   # sector-relative — important market signal
     "asset_floor":        0.5,   # tangible book floor
 }
 
@@ -325,12 +327,13 @@ def _dcf_two_stage(info: dict, wacc: float, shares: float) -> ModelResult:
     Stage 1: HIGH_GROWTH_YEARS at a haircut of trailing FCF growth
     Stage 2: Terminal value at TERMINAL_GROWTH_RATE, valued via Gordon Growth
 
-    Key conservatism vs Morningstar:
-      - Uses 60% of trailing growth (not 80-100%)
-      - Caps growth at 12% (Morningstar often uses 15-25% for tech)
-      - Only 5 years of high growth (Morningstar often uses 10)
-      - Higher WACC (9% floor vs Morningstar's 7-8%)
-      - Terminal growth capped at 2.5% (some models use 3-4%)
+    Calibration vs Morningstar:
+      - Uses 70% of trailing growth (Morningstar uses ~80-100%)
+      - Caps growth at 15% (Morningstar often uses 15-25% for tech)
+      - 7 years of high growth (Morningstar base: 5-10)
+      - WACC floor of 8% (Morningstar often uses 7-8%)
+      - Terminal growth capped at 2.5%
+      - No extra haircut on terminal value \u2014 WACC + MoS are sufficient
     """
     result = ModelResult(model_name="dcf_two_stage", weight=MODEL_WEIGHTS["dcf_two_stage"])
 
@@ -377,10 +380,8 @@ def _dcf_two_stage(info: dict, wacc: float, shares: float) -> ModelResult:
     terminal_value = terminal_fcf / (wacc - terminal_growth)
     terminal_pv = terminal_value / (1 + wacc) ** HIGH_GROWTH_YEARS
 
-    # Conservative: apply 10% haircut to terminal value
-    # (terminal value assumptions are always the weakest link)
-    terminal_pv *= 0.90
-
+    # No additional haircut on terminal value — WACC and margin of safety
+    # already provide sufficient conservatism without double-counting.
     enterprise_value = stage1_pv + terminal_pv
 
     # Deduct net debt to get equity value
@@ -552,13 +553,13 @@ def _earnings_power_value(info: dict, wacc: float, shares: float) -> ModelResult
     capex_raw = info.get("capitalExpenditures")
     op_cf = info.get("_operating_cf")
     if capex_raw and op_cf and op_cf > 0:
-        maintenance_capex = abs(capex_raw) * 0.70  # assume 70% is maintenance
+        maintenance_capex = abs(capex_raw) * 0.60  # assume 60% is maintenance, 40% growth
         adjusted_earnings = op_cf - maintenance_capex
         if adjusted_earnings > 0:
             epv_enterprise = adjusted_earnings / wacc
     elif capex_raw and fcf_hist:
         op_cf_est = fcf_hist[0] + abs(capex_raw)  # reconstruct operating CF
-        maintenance_capex = abs(capex_raw) * 0.70
+        maintenance_capex = abs(capex_raw) * 0.60
         adjusted_earnings = op_cf_est - maintenance_capex
         if adjusted_earnings > 0:
             epv_enterprise = adjusted_earnings / wacc
@@ -620,9 +621,9 @@ def _graham_number(info: dict, shares: float) -> ModelResult:
 
     bvps = equity / shares
 
-    # Conservative Graham: sqrt(15 × EPS × BVPS)
-    # (not the 22.5 version — we want to be MORE conservative than Graham)
-    product = 15.0 * eps * bvps
+    # Graham's original formula: sqrt(22.5 × EPS × BVPS)
+    # 22.5 = 15 (max P/E) × 1.5 (max P/B) — the classic Graham Number
+    product = 22.5 * eps * bvps
     if product <= 0:
         result.error = "Negative EPS×BVPS product"
         return result
@@ -633,9 +634,9 @@ def _graham_number(info: dict, shares: float) -> ModelResult:
     result.inputs = {
         "eps": round(eps, 2),
         "bvps": round(bvps, 2),
-        "multiplier": 15.0,
+        "multiplier": 22.5,
     }
-    result.notes = f"sqrt(15 × ${eps:.2f} EPS × ${bvps:.2f} BVPS) = ${graham_value:.2f}"
+    result.notes = f"sqrt(22.5 × ${eps:.2f} EPS × ${bvps:.2f} BVPS) = ${graham_value:.2f}"
     return result
 
 
@@ -684,11 +685,12 @@ def _excess_returns(info: dict, wacc: float, shares: float) -> ModelResult:
         return result
 
     # PV of excess returns (assume they fade over time)
-    # Conservative: assume excess returns decay by 10% per year (competitive erosion)
-    fade_rate = 0.10
+    # 8% annual fade over 20 years — reflects realistic competitive-moat duration
+    # (Morningstar uses 10-15 yr; Damodaran varies by industry)
+    fade_rate = 0.08
     pv_excess = 0.0
     annual_excess = excess_return
-    for yr in range(1, 16):  # 15-year horizon
+    for yr in range(1, 21):  # 20-year horizon
         annual_excess *= (1 - fade_rate)
         pv_excess += annual_excess / (1 + wacc) ** yr
 
@@ -733,9 +735,9 @@ def _dividend_discount(info: dict, wacc: float, shares: float) -> ModelResult:
         result.weight = 0
         return result
 
-    # Conservative: assume company pays out only 40% of FCF as dividend
-    # (lower than typical payout ratios)
-    payout_ratio = 0.40
+    # Assume company distributes 50% of FCF (dividends + buybacks) to equity holders
+    # This is close to the S&P 500 long-run average total shareholder yield.
+    payout_ratio = 0.50
     sustainable_dividend = fcf_hist[0] * payout_ratio
 
     if shares <= 0:
@@ -766,7 +768,7 @@ def _dividend_discount(info: dict, wacc: float, shares: float) -> ModelResult:
         "div_growth": round(div_growth, 4),
         "cost_of_equity": round(cost_of_equity, 4),
     }
-    result.notes = f"DPS=${dps:.2f} (40% of FCF) growing at {div_growth:.1%}, CoE={cost_of_equity:.1%}"
+    result.notes = f"DPS=${dps:.2f} (50% of FCF) growing at {div_growth:.1%}, CoE={cost_of_equity:.1%}"
     return result
 
 
@@ -809,25 +811,29 @@ def _relative_pe(info: dict, shares: float) -> ModelResult:
 
     normalized_eps = normalized_earnings / shares
 
-    # Conservative target P/E assignment
-    # Graham: pay no more than 15x for a stock with no growth
-    # Allow up to 18x for growing companies, but never more
+    # Target P/E assignment — graduated by quality and growth
+    # Anchored to: Graham's 15x no-growth floor, ~25x ceiling for high-quality growers
+    # (Morningstar freely assigns 30-40x; we cap at 25x to stay realistic, not heroic)
     roic = info.get("roic")
     rev_growth = info.get("revenue_growth") or 0
 
-    if roic and roic > 0.20 and rev_growth > 0.08:
-        target_pe = 18.0  # high quality + growing
+    if roic and roic > 0.20 and rev_growth > 0.10:
+        target_pe = 25.0  # wide-moat compounder with strong growth
+    elif roic and roic > 0.20 and rev_growth > 0.05:
+        target_pe = 22.0  # wide moat, moderate growth
+    elif roic and roic > 0.15 and rev_growth > 0.05:
+        target_pe = 20.0  # good ROIC, growing
     elif roic and roic > 0.15:
-        target_pe = 16.0
+        target_pe = 18.0  # good ROIC, flat revenue
     elif roic and roic > 0.10:
-        target_pe = 14.0
+        target_pe = 16.0  # average quality
     else:
-        target_pe = 12.0  # below-average company
+        target_pe = 15.0  # Graham's baseline for a no-moat company
 
-    # Actual P/E penalty: if current P/E is way above target, further reduce
+    # Moderate premium check: if market P/E is extremely stretched, stay disciplined
     current_pe = info.get("trailingPE")
-    if current_pe and current_pe > 40:
-        target_pe = min(target_pe, 12.0)  # market is euphoric — be extra conservative
+    if current_pe and current_pe > 50:
+        target_pe = min(target_pe, 18.0)  # market is euphoric — cap at 18x
 
     fair_value = normalized_eps * target_pe
 
