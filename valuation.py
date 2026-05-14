@@ -1,43 +1,51 @@
 """
-valuation.py — Conservative intrinsic-value engine.
+valuation.py — Multi-model, realistic intrinsic-value engine.
 
-Implements a multi-model valuation framework inspired by:
+Implements a comprehensive valuation framework inspired by:
   - Aswath Damodaran's "The Little Book of Valuation"
   - Damodaran's "Investment Valuation" (3rd ed.)
   - Greenwald's "Value Investing: From Graham to Buffett"
   - Penman's "Accounting for Value"
   - Graham's "The Intelligent Investor" (margin-of-safety concept)
 
-Design principles
+Design Principles
 -----------------
   1. **Realistic, not punitive**: Each model uses a single layer of conservatism
-     (e.g. 70% of trailing growth, realistic WACC) rather than stacking multiple
-     haircuts that compound into unrealistically low values.
+     rather than stacking multiple haircuts that compound unrealistically.
   2. **Multiple independent models**: No single model drives the output.
-     The final fair value is a WEIGHTED MEDIAN of all 8 models, each with its
-     own lens (cash flow, earnings, assets, relative).
-  3. **Margin of safety**: The "buy price" is fair-value × (1 − margin_of_safety).
+     The final fair value is a WEIGHTED MEDIAN of all models.
+  3. **Margin of safety**: The "buy price" is fair_value × (1 − margin_of_safety).
      MoS = 20% HIGH / 30% MEDIUM / 40% SPECULATIVE — applied once on a realistic base.
   4. **Transparent**: Every model's output and inputs are returned for display.
 
-Models implemented
+Models Implemented
 ------------------
-  M1. Two-Stage DCF (FCF-based)      — Damodaran's workhorse; conservative FCF growth
-  M2. Reverse DCF                     — "What growth is the market pricing in?"
-  M3. Earnings Power Value (EPV)      — Greenwald: value of current earnings, no growth
-  M4. Graham Number                   — Graham's classic margin-of-safety formula
-  M5. Excess Returns / Residual Income — Penman/Damodaran: only value returns > WACC
-  M6. Dividend Discount (if applicable) — Gordon Growth Model with pessimistic payout
-  M7. Relative Valuation (sector P/E) — Conservative median-sector P/E × normalized EPS
-  M8. Asset-based (Book Value floor)  — Tangible book as absolute floor
+  M1. Three-Stage DCF (Morningstar style)  — High growth → fade → terminal
+  M2. Two-Stage DCF (Damodaran style)      — Conservative FCF growth
+  M3. Reverse DCF                          — "What growth is the market pricing in?"
+  M4. Earnings Power Value (Greenwald)     — Value of current earnings, no growth
+  M5. Graham Number                        — Graham's classic formula
+  M6. Excess Returns / Residual Income     — Penman/Damodaran: only value returns > WACC
+  M7. Dividend Discount Model              — Gordon Growth Model with conservative payout
+  M8. Relative Valuation (sector P/E)      — Conservative sector-relative multiple
+  M9. Asset-based (Book Value floor)       — Tangible book as absolute floor
 
-Data source: SEC EDGAR via edgar.py (no API key, no scraping).
+Composite Output
+----------------
+  - Fair value: weighted median of all valid models
+  - Buy price: fair_value × (1 − margin_of_safety)
+  - Zacks Rank: 1–5 based on EPS trends, surprises, momentum (analyst-style)
+  - Quality score: 0–100 based on profitability, growth, financial strength
+  - Valuation signal: DEEP_VALUE / UNDERVALUED / FAIR / SLIGHTLY_OVER / OVERVALUED / EXPENSIVE
+
+Data Source: SEC EDGAR via edgar.py (no API key, no scraping)
 """
 
 from __future__ import annotations
 
 import logging
 import math
+import statistics
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -47,30 +55,25 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Configuration — deliberately conservative defaults
+# Configuration — deliberately realistic defaults
 # ---------------------------------------------------------------------------
 
 # WACC / discount rate assumptions
-# Morningstar uses company-specific WACC (often 7-9% for large caps).
-# We use a HIGHER discount rate to be conservative.
 DEFAULT_RISK_FREE_RATE: float = 0.043       # ~10Y US Treasury yield
 DEFAULT_EQUITY_RISK_PREMIUM: float = 0.055  # Damodaran's 2024 ERP for US
 DEFAULT_BETA_FLOOR: float = 0.8             # never assume beta < 0.8
 DEFAULT_BETA_CAP: float = 2.0               # cap at 2.0
-DEFAULT_COST_OF_DEBT: float = 0.055         # after-tax cost of debt assumption
+DEFAULT_COST_OF_DEBT: float = 0.055         # after-tax cost of debt
 DEFAULT_TAX_RATE: float = 0.21              # US corporate tax rate
-WACC_FLOOR: float = 0.08                    # floor at 8% — reasonable for investment-grade large caps
+WACC_FLOOR: float = 0.08                    # floor at 8%
 WACC_CAP: float = 0.16                      # cap at 16%
 
-# Growth assumptions — calibrated to be conservative but realistic
-# Morningstar base-case: 80-100% of trailing growth for 5-10 years.
-# We use 70% of trailing growth for 7 years — still cautious but not punitive.
-MAX_HIGH_GROWTH_RATE: float = 0.15          # cap at 15% (Morningstar uses 25%+ for tech)
+# Growth assumptions — realistic but cautious
+MAX_HIGH_GROWTH_RATE: float = 0.15          # cap at 15%
 HIGH_GROWTH_HAIRCUT: float = 0.70           # use 70% of trailing growth
-HIGH_GROWTH_YEARS: int = 7                  # 7 years of above-average growth (industry standard)
-TERMINAL_GROWTH_RATE: float = 0.025         # long-run GDP growth (2.5%) — Damodaran standard
+HIGH_GROWTH_YEARS: int = 7                  # 7 years of above-average growth
+TERMINAL_GROWTH_RATE: float = 0.025         # long-run GDP growth (2.5%)
 TERMINAL_GROWTH_CAP: float = 0.03           # terminal growth never exceeds 3%
-# For negative/zero growth companies, assume 0% in high-growth phase
 MIN_HIGH_GROWTH_RATE: float = 0.0
 
 # FCF conversion
@@ -78,31 +81,39 @@ FCF_TO_REVENUE_FLOOR: float = 0.03          # assume at least 3% FCF margin
 FCF_TO_REVENUE_CAP: float = 0.30            # cap at 30% FCF margin
 
 # Margin of safety (Buffett/Graham concept)
-# Applied AFTER realistic fair value — these are the primary safety buffer.
 MARGIN_OF_SAFETY_HIGH_QUALITY: float = 0.20  # 20% MoS for best companies
 MARGIN_OF_SAFETY_MEDIUM: float = 0.30        # 30% MoS for average companies
-MARGIN_OF_SAFETY_SPECULATIVE: float = 0.40   # 40% MoS for low-quality / high-uncertainty
+MARGIN_OF_SAFETY_SPECULATIVE: float = 0.40   # 40% MoS for low-quality
 
 # Model weights for composite valuation
-# Balanced: no single model dominates; cash-flow models get modest priority
 MODEL_WEIGHTS = {
-    "dcf_two_stage":      2.5,   # primary cash-flow model
-    "reverse_dcf":        1.0,   # diagnostic — realistic fair-value sanity check
-    "epv":                1.5,   # zero-growth earnings power — lower-bound anchor
+    "dcf_three_stage":    3.0,   # Morningstar-style 3-stage DCF
+    "dcf_two_stage":      2.0,   # classic DCF
+    "reverse_dcf":        1.0,   # diagnostic sanity check
+    "epv":                1.5,   # zero-growth earnings power
     "graham_number":      1.5,   # Graham's original formula
-    "excess_returns":     2.0,   # residual income / economic profit
+    "excess_returns":     2.0,   # residual income
     "ddm":                1.5,   # dividend/FCF yield model
-    "relative_pe":        2.0,   # sector-relative — important market signal
+    "relative_pe":        2.0,   # sector-relative multiple
     "asset_floor":        0.5,   # tangible book floor
 }
 
-# Quality score thresholds for margin-of-safety tiering
-QUALITY_HIGH_THRESHOLD: float = 70.0    # quality score >= 70 → high quality
-QUALITY_MEDIUM_THRESHOLD: float = 45.0  # quality score >= 45 → medium
+# Zacks Rank mapping
+ZACKS_RANK_LABELS = {
+    1: "Strong Buy",
+    2: "Buy",
+    3: "Hold",
+    4: "Sell",
+    5: "Strong Sell",
+}
+
+# Quality thresholds
+QUALITY_HIGH_THRESHOLD: float = 65.0
+QUALITY_MEDIUM_THRESHOLD: float = 35.0
 
 
 # ---------------------------------------------------------------------------
-# Data types
+# Data Classes
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -132,21 +143,25 @@ class ValuationResult:
     fair_value_high: Optional[float] = None     # optimistic bound (75th pctile)
 
     # Buy/sell signals
-    margin_of_safety_pct: float = 0.30          # applied MoS %
-    buy_price: Optional[float] = None           # fair_value × (1 − MoS)
-    upside_pct: Optional[float] = None          # (fair_value / price − 1) × 100
-    upside_to_buy_pct: Optional[float] = None   # (price / buy_price − 1) × 100
-    valuation_signal: str = "HOLD"              # DEEP_VALUE / UNDERVALUED / FAIR / OVERVALUED / EXPENSIVE
-    valuation_grade: str = "—"                  # A/B/C/D/F letter grade
+    margin_of_safety_pct: float = 0.30
+    buy_price: Optional[float] = None
+    upside_pct: Optional[float] = None
+    upside_to_buy_pct: Optional[float] = None
+    valuation_signal: str = "HOLD"
+    valuation_grade: str = "—"
 
     # Quality assessment
-    quality_score: float = 50.0                 # 0-100 composite quality
-    quality_tier: str = "MEDIUM"                # HIGH / MEDIUM / SPECULATIVE
+    quality_score: float = 50.0
+    quality_tier: str = "MEDIUM"
     moat_indicators: list[str] = field(default_factory=list)
 
+    # Zacks Rank
+    zacks_rank: int = 3
+    zacks_label: str = "Hold"
+
     # Reverse DCF diagnostic
-    implied_growth_rate: Optional[float] = None  # what growth the market is pricing in
-    growth_reasonableness: str = "—"             # "REASONABLE" / "OPTIMISTIC" / "HEROIC"
+    implied_growth_rate: Optional[float] = None
+    growth_reasonableness: str = "—"
 
     # Display
     summary: str = ""
@@ -154,11 +169,57 @@ class ValuationResult:
 
 
 # ---------------------------------------------------------------------------
-# WACC estimation
+# Helper Functions
 # ---------------------------------------------------------------------------
 
+def _estimate_net_debt(info: dict) -> float:
+    """Estimate net debt = total debt - cash."""
+    # Try new-style keys first
+    cash = info.get("cash")
+    debt_current = info.get("currentDebt") or 0.0
+    debt_long = info.get("longTermDebt") or 0.0
+    total_debt = debt_current + debt_long
+    
+    # Fallback to old-style keys for testing
+    if not total_debt and "_total_debt" in info:
+        total_debt = info.get("_total_debt") or 0.0
+    
+    if cash is None:
+        # Try old-style key
+        cash = info.get("_cash")
+    
+    if cash is None:
+        cash = 0.0
+    
+    net_debt = max(0.0, total_debt - cash)
+    return net_debt
+
+
+def _get_equity(info: dict) -> float:
+    """Get total shareholders' equity."""
+    equity = info.get("totalStockholderEquity")
+    if equity is None:
+        # Try old-style key
+        equity = info.get("_equity")
+    
+    if equity is None:
+        # Fallback: assets - liabilities
+        assets = info.get("totalAssets")
+        liabilities = info.get("totalLiabilities")
+        if assets and liabilities:
+            equity = assets - liabilities
+        else:
+            equity = 1.0  # fallback to avoid division by zero
+    return equity or 1.0
+
+
+def _get_long_term_debt(info: dict) -> float:
+    """Get long-term debt."""
+    return info.get("longTermDebt") or 0.0
+
+
 def _estimate_wacc(info: dict) -> float:
-    """Estimate WACC from available fundamentals. Conservative bias.
+    """Estimate WACC from available fundamentals.
 
     WACC = (E/V)×Re + (D/V)×Rd×(1−T)
     where Re = Rf + β×ERP  (CAPM)
@@ -166,142 +227,110 @@ def _estimate_wacc(info: dict) -> float:
     rf = DEFAULT_RISK_FREE_RATE
     erp = DEFAULT_EQUITY_RISK_PREMIUM
 
-    # Beta — use trailing if available, otherwise assume sector average
+    # Estimate beta
     beta = info.get("beta")
-    if beta is None or not isinstance(beta, (int, float)) or math.isnan(beta):
-        beta = 1.1  # slightly above market (conservative for unknowns)
+    if beta is None or beta <= 0:
+        beta = 1.0
     beta = max(DEFAULT_BETA_FLOOR, min(DEFAULT_BETA_CAP, beta))
 
     # Cost of equity (CAPM)
-    cost_of_equity = rf + beta * erp
+    re = rf + beta * erp
 
-    # Capital structure
-    market_cap = info.get("marketCap") or 0
-    de_raw = info.get("debtToEquity")
-    if de_raw and market_cap > 0:
-        de = de_raw / 100.0
-        debt = market_cap * de
-        total_value = market_cap + debt
-        equity_weight = market_cap / total_value
-        debt_weight = debt / total_value
-    else:
-        equity_weight = 0.80
-        debt_weight = 0.20
-
-    cost_of_debt = DEFAULT_COST_OF_DEBT
+    # Cost of debt
+    rd = DEFAULT_COST_OF_DEBT
     tax_rate = DEFAULT_TAX_RATE
 
-    wacc = equity_weight * cost_of_equity + debt_weight * cost_of_debt * (1 - tax_rate)
+    # Market values (use book values as proxy if market values unavailable)
+    equity_value = info.get("marketCap")
+    debt_value = _estimate_net_debt(info)
 
-    # Clamp to floor/cap
+    if equity_value is None or equity_value <= 0:
+        # Fallback: use book value
+        equity_value = _get_equity(info)
+
+    if equity_value and equity_value > 0 and debt_value and debt_value > 0:
+        total_value = equity_value + debt_value
+        we = equity_value / total_value
+        wd = debt_value / total_value
+        wacc = we * re + wd * rd * (1 - tax_rate)
+    else:
+        # All equity — just use cost of equity
+        wacc = re
+
+    # Apply floor and cap
     wacc = max(WACC_FLOOR, min(WACC_CAP, wacc))
+    return wacc
 
-    return round(wacc, 4)
-
-
-# ---------------------------------------------------------------------------
-# Quality assessment — drives margin of safety tier
-# ---------------------------------------------------------------------------
 
 def _assess_quality(info: dict) -> tuple[float, str, list[str]]:
-    """Score company quality 0-100 and identify moat indicators.
-
-    Returns (score, tier, moat_indicators).
-    """
-    score = 50.0  # baseline: average company
+    """Composite quality score 0–100 based on profitability, growth, financial strength."""
+    score = 50.0  # base score
     moat_indicators = []
 
-    # ROIC > 15% = has economic moat (returns above cost of capital)
-    roic = info.get("roic")
-    roic_prior = info.get("roic_prior")
-    if roic is not None:
-        if roic > 0.20:
-            score += 12
-            moat_indicators.append(f"ROIC {roic:.0%} (excellent)")
-        elif roic > 0.15:
-            score += 8
-            moat_indicators.append(f"ROIC {roic:.0%} (strong)")
-        elif roic > 0.10:
-            score += 3
-        elif roic < 0.05:
-            score -= 10
-        # ROIC stability bonus
-        if roic_prior is not None and roic > 0.12 and roic_prior > 0.12:
+    # ROE (return on equity)
+    roe = info.get("returnOnEquity")
+    if roe is not None:
+        if roe > 0.25:
+            score += 15
+            moat_indicators.append(f"Exceptional ROE {roe:.0%}")
+        elif roe > 0.15:
+            score += 10
+            moat_indicators.append(f"Strong ROE {roe:.0%}")
+        elif roe > 0.10:
             score += 5
-            moat_indicators.append("Stable ROIC (multi-year)")
+            moat_indicators.append(f"Adequate ROE {roe:.0%}")
+        elif roe > 0:
+            score += 0
+        else:
+            score -= 15
+            moat_indicators.append(f"Negative ROE {roe:.0%}")
 
-    # Profit margins > 15% = pricing power / moat
-    margin = info.get("profitMargins")
-    if margin is not None:
-        if margin > 0.25:
-            score += 8
-            moat_indicators.append(f"Net margin {margin:.0%} (wide moat)")
-        elif margin > 0.15:
-            score += 4
-            moat_indicators.append(f"Net margin {margin:.0%}")
-        elif margin < 0.05:
-            score -= 8
-
-    # FCF margin consistency
-    fcf_margin = info.get("fcf_margin")
-    if fcf_margin is not None:
+    # Profit margin (FCF margin preferred)
+    fcf_hist = info.get("_fcf_history", [])
+    revenue = info.get("revenue_current")
+    if fcf_hist and fcf_hist[0] and revenue and revenue > 0:
+        fcf_margin = fcf_hist[0] / revenue
         if fcf_margin > 0.20:
-            score += 6
-            moat_indicators.append(f"FCF margin {fcf_margin:.0%} (cash machine)")
+            score += 8
+            moat_indicators.append(f"Excellent FCF margin {fcf_margin:.0%}")
         elif fcf_margin > 0.10:
-            score += 3
+            score += 5
+        elif fcf_margin > 0.05:
+            score += 2
         elif fcf_margin < 0:
             score -= 10
 
-    # Cash conversion > 1x = converting earnings to real cash
-    cc = info.get("cash_conversion")
-    if cc is not None:
-        if cc > 1.0:
+    # Debt/Equity
+    de = info.get("debtToEquity")
+    if de is not None:
+        de_ratio = de / 100.0 if de > 1 else de
+        if de_ratio < 0.5:
+            score += 8
+            moat_indicators.append("Conservative leverage")
+        elif de_ratio < 1.0:
             score += 4
-            moat_indicators.append("Cash conversion >1x")
-        elif cc < 0.5:
-            score -= 5
+        elif de_ratio > 3.0:
+            score -= 12
 
-    # Low leverage = financial strength
-    de_raw = info.get("debtToEquity")
-    if de_raw is not None:
-        de = de_raw / 100.0
-        if de < 0.5:
-            score += 5
-            moat_indicators.append("Low leverage")
-        elif de > 3.0:
-            score -= 8
-
-    # Revenue growth consistency
+    # Growth consistency
     rev_growth = info.get("revenue_growth")
     if rev_growth is not None:
-        if rev_growth > 0.10:
-            score += 4
-        elif rev_growth < -0.05:
-            score -= 6
-
-    # Accruals ratio (earnings quality)
-    accruals = info.get("accruals_ratio")
-    if accruals is not None:
-        if accruals < 0:
-            score += 3  # negative accruals = very high earnings quality
-            moat_indicators.append("Negative accruals (high quality)")
-        elif accruals > 0.10:
-            score -= 5
-
-    # FCF increasing
-    fcf_hist = info.get("_fcf_history", [])
-    if len(fcf_hist) >= 3:
-        growth_yrs = sum(1 for i in range(len(fcf_hist) - 1) if fcf_hist[i] > fcf_hist[i+1])
-        if growth_yrs >= len(fcf_hist) - 1:
+        if rev_growth > 0.15:
+            score += 8
+            moat_indicators.append(f"Strong revenue growth {rev_growth:.0%}")
+        elif rev_growth > 0.10:
             score += 5
-            moat_indicators.append("FCF growing every year")
+        elif rev_growth > 0.05:
+            score += 2
+        elif rev_growth < -0.05:
+            score -= 8
 
-    # ROE consistency
-    roe = info.get("returnOnEquity")
-    if roe is not None and roe > 0.20:
-        score += 4
-        moat_indicators.append(f"ROE {roe:.0%}")
+    # FCF history (consecutive years of growth)
+    if len(fcf_hist) >= 3:
+        growth_count = sum(1 for i in range(len(fcf_hist) - 1) if fcf_hist[i] > fcf_hist[i+1])
+        if growth_count >= 2:
+            score += 5
+            moat_indicators.append("FCF growing consistently")
 
     # Clamp score
     score = max(0, min(100, score))
@@ -317,172 +346,134 @@ def _assess_quality(info: dict) -> tuple[float, str, list[str]]:
     return score, tier, moat_indicators
 
 
-# ---------------------------------------------------------------------------
-# Model 1: Two-Stage DCF (FCF-based) — Damodaran
-# ---------------------------------------------------------------------------
+def _zacks_rank(info: dict) -> tuple[int, str]:
+    """Compute Zacks-style rank (1–5) based on EPS trends, surprises, momentum.
 
-def _dcf_two_stage(info: dict, wacc: float, shares: float) -> ModelResult:
-    """Conservative two-stage DCF using free cash flow.
+    Zacks Rank integrates:
+      1. EPS revisions (analyst consensus trending up/down)
+      2. EPS surprises (actual beats/misses)
+      3. Estimate momentum (revisions accelerating)
+      4. Relative valuation (P/E vs. growth)
 
-    Stage 1: HIGH_GROWTH_YEARS at a haircut of trailing FCF growth
-    Stage 2: Terminal value at TERMINAL_GROWTH_RATE, valued via Gordon Growth
-
-    Calibration vs Morningstar:
-      - Uses 70% of trailing growth (Morningstar uses ~80-100%)
-      - Caps growth at 15% (Morningstar often uses 15-25% for tech)
-      - 7 years of high growth (Morningstar base: 5-10)
-      - WACC floor of 8% (Morningstar often uses 7-8%)
-      - Terminal growth capped at 2.5%
-      - No extra haircut on terminal value \u2014 WACC + MoS are sufficient
+    Returns: (rank, label)
     """
-    result = ModelResult(model_name="dcf_two_stage", weight=MODEL_WEIGHTS["dcf_two_stage"])
+    rank_score = 50  # 0–100 scale; 50 = neutral (Hold)
 
-    fcf_hist = info.get("_fcf_history", [])
-    if not fcf_hist or fcf_hist[0] is None:
-        result.error = "No FCF data available"
-        return result
+    # EPS revisions (direction: are analysts raising or lowering estimates?)
+    eps_revision = info.get("epsRevisions")  # e.g., "up 5%", "down 2%"
+    if eps_revision:
+        # Simplistic: if positive, bump score; if negative, reduce
+        # In production, parse the % value
+        if isinstance(eps_revision, str):
+            if "up" in eps_revision.lower():
+                rank_score += 15
+            elif "down" in eps_revision.lower():
+                rank_score -= 15
 
-    current_fcf = fcf_hist[0]
-    if current_fcf <= 0:
-        result.error = f"Negative FCF (${current_fcf:,.0f}) — cannot run DCF"
-        return result
+    # EPS surprises (actual beats historical expectation)
+    eps_surprise = info.get("epsTrailingTwelveMonths")  # e.g., 3.45
+    eps_estimate = info.get("epsCurrentYear")  # e.g., 3.50
+    if eps_surprise and eps_estimate and eps_estimate > 0:
+        surprise_pct = (eps_surprise - eps_estimate) / eps_estimate
+        if surprise_pct > 0.05:
+            rank_score += 10
+        elif surprise_pct < -0.05:
+            rank_score -= 10
 
-    # Estimate trailing FCF growth rate
-    if len(fcf_hist) >= 3 and fcf_hist[-1] > 0:
-        n_years = len(fcf_hist) - 1
-        fcf_cagr = (fcf_hist[0] / fcf_hist[-1]) ** (1.0 / n_years) - 1
-    elif len(fcf_hist) >= 2 and fcf_hist[1] > 0:
-        fcf_cagr = (fcf_hist[0] / fcf_hist[1]) - 1
-    else:
-        fcf_cagr = 0.05  # default conservative assumption
-
-    # Apply conservatism: use HIGH_GROWTH_HAIRCUT of trailing, cap at MAX
-    high_growth = fcf_cagr * HIGH_GROWTH_HAIRCUT
-    high_growth = max(MIN_HIGH_GROWTH_RATE, min(MAX_HIGH_GROWTH_RATE, high_growth))
-
-    terminal_growth = min(TERMINAL_GROWTH_RATE, TERMINAL_GROWTH_CAP)
-
-    # Additional conservatism: if WACC - terminal_growth is too small,
-    # the terminal value explodes. Enforce a minimum spread.
-    if wacc - terminal_growth < 0.04:
-        terminal_growth = wacc - 0.04
-
-    # Stage 1: Projected FCFs
-    stage1_pv = 0.0
-    projected_fcf = current_fcf
-    for year in range(1, HIGH_GROWTH_YEARS + 1):
-        projected_fcf *= (1 + high_growth)
-        pv = projected_fcf / (1 + wacc) ** year
-        stage1_pv += pv
-
-    # Stage 2: Terminal value (Gordon Growth)
-    terminal_fcf = projected_fcf * (1 + terminal_growth)
-    terminal_value = terminal_fcf / (wacc - terminal_growth)
-    terminal_pv = terminal_value / (1 + wacc) ** HIGH_GROWTH_YEARS
-
-    # No additional haircut on terminal value — WACC and margin of safety
-    # already provide sufficient conservatism without double-counting.
-    enterprise_value = stage1_pv + terminal_pv
-
-    # Deduct net debt to get equity value
-    net_debt = _estimate_net_debt(info)
-    equity_value = enterprise_value - net_debt
-
-    if shares > 0 and equity_value > 0:
-        result.fair_value_per_share = round(equity_value / shares, 2)
-
-    result.inputs = {
-        "current_fcf": current_fcf,
-        "trailing_fcf_cagr": round(fcf_cagr, 4),
-        "applied_growth": round(high_growth, 4),
-        "terminal_growth": round(terminal_growth, 4),
-        "wacc": wacc,
-        "high_growth_years": HIGH_GROWTH_YEARS,
-        "stage1_pv": round(stage1_pv, 0),
-        "terminal_pv": round(terminal_pv, 0),
-        "net_debt": round(net_debt, 0),
-        "enterprise_value": round(enterprise_value, 0),
-    }
-    result.notes = (
-        f"FCF=${current_fcf/1e9:.1f}B → grow at {high_growth:.1%} for {HIGH_GROWTH_YEARS}yr "
-        f"→ terminal at {terminal_growth:.1%} | WACC={wacc:.1%}"
-    )
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Model 2: Reverse DCF — "What growth is the market pricing in?"
-# ---------------------------------------------------------------------------
-
-def _reverse_dcf(info: dict, wacc: float, shares: float,
-                 current_price: float) -> ModelResult:
-    """Solve for the FCF growth rate implied by the current market price.
-
-    If the implied growth is unreasonably high (>15%), the stock is expensive
-    relative to any reasonable scenario.
-    """
-    result = ModelResult(model_name="reverse_dcf", weight=MODEL_WEIGHTS["reverse_dcf"])
-
-    fcf_hist = info.get("_fcf_history", [])
-    if not fcf_hist or fcf_hist[0] is None or fcf_hist[0] <= 0:
-        result.error = "No positive FCF for reverse DCF"
-        return result
-
-    current_fcf = fcf_hist[0]
-    market_cap = current_price * shares if shares > 0 else 0
-    net_debt = _estimate_net_debt(info)
-    enterprise_value = market_cap + net_debt
-
-    if enterprise_value <= 0:
-        result.error = "Invalid enterprise value"
-        return result
-
-    terminal_growth = TERMINAL_GROWTH_RATE
-
-    # Binary search for the implied growth rate
-    low, high = -0.10, 0.50
-    for _ in range(100):
-        mid = (low + high) / 2
-        ev = _calc_ev_from_growth(current_fcf, mid, terminal_growth, wacc)
-        if ev < enterprise_value:
-            low = mid
+    # Estimate momentum: forward estimates vs. trailing
+    if eps_estimate and eps_surprise:
+        if eps_estimate > eps_surprise:
+            rank_score += 5  # forward growth expected
         else:
-            high = mid
-        if abs(high - low) < 0.0001:
-            break
+            rank_score -= 5
 
-    implied_growth = round((low + high) / 2, 4)
+    # Relative valuation: P/E vs. growth (PEG)
+    pe = info.get("trailingPE")
+    growth = info.get("revenue_growth")
+    if pe and pe > 0 and growth and growth > 0:
+        peg = pe / (growth * 100)
+        if peg < 1.0:
+            rank_score += 8
+        elif peg > 2.0:
+            rank_score -= 8
 
-    # Assess reasonableness
-    if implied_growth > 0.20:
-        reasonableness = "HEROIC"
-    elif implied_growth > 0.12:
-        reasonableness = "OPTIMISTIC"
-    elif implied_growth > 0.05:
-        reasonableness = "REASONABLE"
-    elif implied_growth > 0:
-        reasonableness = "CONSERVATIVE"
+    # Momentum: relative to 52-week highs/lows (price action)
+    price_52w_high = info.get("fiftyTwoWeekHigh")
+    price_52w_low = info.get("fiftyTwoWeekLow")
+    current_price = info.get("currentPrice")
+    if price_52w_high and price_52w_low and current_price:
+        momentum = (current_price - price_52w_low) / (price_52w_high - price_52w_low)
+        if momentum > 0.7:
+            rank_score += 10
+        elif momentum < 0.3:
+            rank_score -= 10
+
+    # Clamp and convert to Zacks rank (1–5)
+    rank_score = max(0, min(100, rank_score))
+    
+    # 0–20: Strong Buy (1)
+    # 20–40: Buy (2)
+    # 40–60: Hold (3)
+    # 60–80: Sell (4)
+    # 80–100: Strong Sell (5)
+    if rank_score < 20:
+        zacks_rank = 1
+    elif rank_score < 40:
+        zacks_rank = 2
+    elif rank_score < 60:
+        zacks_rank = 3
+    elif rank_score < 80:
+        zacks_rank = 4
     else:
-        reasonableness = "NEGATIVE (deep value?)"
+        zacks_rank = 5
 
-    # Reverse DCF doesn't produce a fair value directly — it's diagnostic
-    # We use it to produce a "reality-check" fair value:
-    # "If growth is only X%, what would the stock be worth?"
-    # Use a reasonable growth assumption (min of trailing or 8%)
-    reasonable_growth = min(0.08, max(0.0, implied_growth * 0.5))
-    reasonable_ev = _calc_ev_from_growth(current_fcf, reasonable_growth, terminal_growth, wacc)
-    equity_val = reasonable_ev - net_debt
-    if shares > 0 and equity_val > 0:
-        result.fair_value_per_share = round(equity_val / shares, 2)
+    label = ZACKS_RANK_LABELS.get(zacks_rank, "Hold")
+    return zacks_rank, label
 
-    result.inputs = {
-        "implied_growth": implied_growth,
-        "current_fcf": current_fcf,
-        "enterprise_value": round(enterprise_value, 0),
-        "reasonableness": reasonableness,
-    }
-    result.notes = f"Market implies {implied_growth:.1%} FCF growth for {HIGH_GROWTH_YEARS}yr — {reasonableness}"
-    return result
+
+def _weighted_median(weighted_values: list[tuple[float, float]]) -> float:
+    """Calculate weighted median of values."""
+    if not weighted_values:
+        return 0.0
+    
+    # Sort by value
+    sorted_vals = sorted(weighted_values, key=lambda x: x[0])
+    total_weight = sum(w for _, w in sorted_vals)
+    
+    if total_weight <= 0:
+        return 0.0
+    
+    cumulative = 0.0
+    target = total_weight / 2.0
+    
+    for val, weight in sorted_vals:
+        cumulative += weight
+        if cumulative >= target:
+            return val
+    
+    return sorted_vals[-1][0]
+
+
+def _weighted_percentile(weighted_values: list[tuple[float, float]], percentile: float) -> float:
+    """Calculate weighted percentile of values (0.0–1.0)."""
+    if not weighted_values:
+        return 0.0
+    
+    sorted_vals = sorted(weighted_values, key=lambda x: x[0])
+    total_weight = sum(w for _, w in sorted_vals)
+    
+    if total_weight <= 0:
+        return 0.0
+    
+    cumulative = 0.0
+    target = total_weight * percentile
+    
+    for val, weight in sorted_vals:
+        cumulative += weight
+        if cumulative >= target:
+            return val
+    
+    return sorted_vals[-1][0]
 
 
 def _calc_ev_from_growth(fcf: float, growth: float, terminal_growth: float,
@@ -490,80 +481,261 @@ def _calc_ev_from_growth(fcf: float, growth: float, terminal_growth: float,
     """Calculate enterprise value for a given FCF growth rate."""
     if wacc <= terminal_growth:
         return float("inf")
+    
     pv = 0.0
     projected = fcf
     for yr in range(1, HIGH_GROWTH_YEARS + 1):
         projected *= (1 + growth)
         pv += projected / (1 + wacc) ** yr
+    
     term_fcf = projected * (1 + terminal_growth)
     term_val = term_fcf / (wacc - terminal_growth)
     pv += term_val / (1 + wacc) ** HIGH_GROWTH_YEARS
+    
     return pv
 
 
 # ---------------------------------------------------------------------------
-# Model 3: Earnings Power Value (Greenwald)
+# Model 1: Three-Stage DCF (Morningstar Style)
+# ---------------------------------------------------------------------------
+
+def _dcf_three_stage(info: dict, wacc: float, shares: float) -> ModelResult:
+    """Morningstar-style 3-stage DCF: high growth → fade → terminal."""
+    result = ModelResult(model_name="dcf_three_stage", weight=MODEL_WEIGHTS["dcf_three_stage"])
+
+    fcf_hist = info.get("_fcf_history", [])
+    if not fcf_hist or fcf_hist[0] is None:
+        result.error = "No FCF data"
+        return result
+
+    current_fcf = fcf_hist[0]
+    if current_fcf <= 0:
+        result.error = f"Negative FCF"
+        return result
+
+    # Stage 1: High growth (5 years)
+    analyst_growth = info.get("analyst_fcf_growth")
+    sector_growth = info.get("sector_fcf_growth")
+    
+    trailing_cagr = None
+    if len(fcf_hist) >= 3 and fcf_hist[-1] > 0:
+        n_years = len(fcf_hist) - 1
+        trailing_cagr = (fcf_hist[0] / fcf_hist[-1]) ** (1.0 / n_years) - 1
+    elif len(fcf_hist) >= 2 and fcf_hist[1] > 0:
+        trailing_cagr = (fcf_hist[0] / fcf_hist[1]) - 1
+    else:
+        trailing_cagr = 0.07
+
+    high_growth = (
+        analyst_growth if analyst_growth is not None else
+        sector_growth if sector_growth is not None else
+        trailing_cagr if trailing_cagr is not None else
+        0.07
+    )
+    high_growth = max(0.0, min(0.18, high_growth))  # cap at 18%
+    
+    fade_growth = max(0.03, min(0.08, high_growth * 0.5))  # fade to 3–8%
+    terminal_growth = min(TERMINAL_GROWTH_RATE, 0.03)
+
+    stage1_years = 5
+    stage2_years = 5
+
+    # Stage 1: Project FCFs
+    stage1_pv = 0.0
+    projected_fcf = current_fcf
+    for year in range(1, stage1_years + 1):
+        projected_fcf *= (1 + high_growth)
+        pv = projected_fcf / (1 + wacc) ** year
+        stage1_pv += pv
+
+    # Stage 2: Fade (linear fade from high_growth to fade_growth)
+    stage2_pv = 0.0
+    start_growth = high_growth
+    for year in range(1, stage2_years + 1):
+        # Linear fade
+        progress = year / stage2_years
+        stage_growth = start_growth + (fade_growth - start_growth) * progress
+        projected_fcf *= (1 + stage_growth)
+        pv = projected_fcf / (1 + wacc) ** (stage1_years + year)
+        stage2_pv += pv
+
+    # Stage 3: Terminal value
+    terminal_fcf = projected_fcf * (1 + terminal_growth)
+    terminal_value = terminal_fcf / (wacc - terminal_growth)
+    stage3_pv = terminal_value / (1 + wacc) ** (stage1_years + stage2_years)
+
+    ev = stage1_pv + stage2_pv + stage3_pv
+    net_debt = _estimate_net_debt(info)
+    equity_value = ev - net_debt
+
+    if shares > 0 and equity_value > 0:
+        result.fair_value_per_share = round(equity_value / shares, 2)
+
+    result.inputs = {
+        "current_fcf": round(current_fcf, 0),
+        "stage1_growth": high_growth,
+        "stage2_fade_to": fade_growth,
+        "terminal_growth": terminal_growth,
+        "wacc": wacc,
+        "ev": round(ev, 0),
+    }
+    result.notes = f"Stage1: {high_growth:.0%}, Stage2→{fade_growth:.0%}, Terminal: {terminal_growth:.0%}"
+    
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Model 2: Two-Stage DCF (Damodaran)
+# ---------------------------------------------------------------------------
+
+def _dcf_two_stage(info: dict, wacc: float, shares: float) -> ModelResult:
+    """Traditional 2-stage DCF: explicit forecast + terminal value."""
+    result = ModelResult(model_name="dcf_two_stage", weight=MODEL_WEIGHTS["dcf_two_stage"])
+
+    fcf_hist = info.get("_fcf_history", [])
+    if not fcf_hist or fcf_hist[0] is None:
+        result.error = "No FCF data"
+        return result
+
+    current_fcf = fcf_hist[0]
+    if current_fcf <= 0:
+        result.error = "Negative FCF"
+        return result
+
+    # Estimate high-growth rate
+    trailing_cagr = 0.07
+    if len(fcf_hist) >= 3 and fcf_hist[-1] and fcf_hist[-1] > 0:
+        n_years = len(fcf_hist) - 1
+        trailing_cagr = (fcf_hist[0] / fcf_hist[-1]) ** (1.0 / n_years) - 1
+    
+    high_growth = max(0.0, min(MAX_HIGH_GROWTH_RATE, trailing_cagr * HIGH_GROWTH_HAIRCUT))
+    terminal_growth = min(TERMINAL_GROWTH_RATE, 0.03)
+
+    # High-growth phase
+    pv_hg = 0.0
+    projected_fcf = current_fcf
+    explicit_years = 10
+    for year in range(1, explicit_years + 1):
+        projected_fcf *= (1 + high_growth)
+        pv_hg += projected_fcf / (1 + wacc) ** year
+
+    # Terminal value
+    terminal_fcf = projected_fcf * (1 + terminal_growth)
+    terminal_value = terminal_fcf / (wacc - terminal_growth)
+    pv_terminal = terminal_value / (1 + wacc) ** explicit_years
+
+    ev = pv_hg + pv_terminal
+    net_debt = _estimate_net_debt(info)
+    equity_value = ev - net_debt
+
+    if shares > 0 and equity_value > 0:
+        result.fair_value_per_share = round(equity_value / shares, 2)
+
+    result.inputs = {
+        "fcf_current": round(current_fcf, 0),
+        "growth": high_growth,
+        "terminal_growth": terminal_growth,
+        "wacc": wacc,
+        "ev": round(ev, 0),
+    }
+    result.notes = f"10-yr explicit, {high_growth:.0%} growth"
+    
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Model 3: Reverse DCF
+# ---------------------------------------------------------------------------
+
+def _reverse_dcf(info: dict, wacc: float, shares: float, current_price: float) -> ModelResult:
+    """Reverse DCF: 'What growth rate is the market pricing in?'"""
+    result = ModelResult(model_name="reverse_dcf", weight=MODEL_WEIGHTS["reverse_dcf"])
+
+    if not current_price or current_price <= 0:
+        result.error = "No current price"
+        return result
+
+    fcf_hist = info.get("_fcf_history", [])
+    if not fcf_hist or not fcf_hist[0] or fcf_hist[0] <= 0:
+        result.error = "No FCF data"
+        return result
+
+    current_fcf = fcf_hist[0]
+    shares_valid = shares if shares and shares > 0 else 1.0
+    market_cap = current_price * shares_valid
+    net_debt = _estimate_net_debt(info)
+    ev_market = market_cap + net_debt
+
+    # Find implied growth via binary search
+    terminal_growth = min(TERMINAL_GROWTH_RATE, 0.03)
+    
+    low_growth = -0.05
+    high_growth = 0.30
+    tolerance = 0.0001
+    
+    for _ in range(50):  # max iterations
+        mid_growth = (low_growth + high_growth) / 2.0
+        ev_calc = _calc_ev_from_growth(current_fcf, mid_growth, terminal_growth, wacc)
+        
+        if ev_calc < ev_market:
+            low_growth = mid_growth
+        else:
+            high_growth = mid_growth
+        
+        if abs(high_growth - low_growth) < tolerance:
+            break
+    
+    implied_growth = (low_growth + high_growth) / 2.0
+    implied_growth = max(-0.05, min(0.25, implied_growth))
+
+    # Assess reasonableness
+    if implied_growth > 0.20:
+        reasonableness = "HEROIC"
+    elif implied_growth > 0.12:
+        reasonableness = "OPTIMISTIC"
+    else:
+        reasonableness = "REASONABLE"
+
+    # Use current price as fair value (it's what the market says)
+    result.fair_value_per_share = round(current_price, 2)
+    
+    result.inputs = {
+        "implied_growth": implied_growth,
+        "reasonableness": reasonableness,
+        "current_price": current_price,
+        "wacc": wacc,
+    }
+    result.notes = f"Market implies {implied_growth:.1%} growth — {reasonableness}"
+    
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Model 4: Earnings Power Value (Greenwald)
 # ---------------------------------------------------------------------------
 
 def _earnings_power_value(info: dict, wacc: float, shares: float) -> ModelResult:
-    """Greenwald's EPV: value of CURRENT earnings with ZERO growth.
-
-    EPV = Normalized Earnings / WACC
-    This is the most conservative growth-agnostic model — it answers
-    "What is this company worth if it NEVER grows?"
-
-    Very powerful for stable businesses; automatically penalises growth stocks.
-    """
+    """Greenwald's EPV: value of current earnings with zero growth."""
     result = ModelResult(model_name="epv", weight=MODEL_WEIGHTS["epv"])
 
-    # Use average of last 2-3 years of net income for normalization
-    # (avoids one-off earnings spikes)
     fcf_hist = info.get("_fcf_history", [])
-
-    # Prefer FCF over net income (higher quality earnings measure)
     if fcf_hist and len(fcf_hist) >= 2:
-        avg_earnings = sum(f for f in fcf_hist[:3] if f is not None) / min(3, len(fcf_hist))
+        avg_earnings = sum(f for f in fcf_hist[:3] if f) / min(3, len(fcf_hist))
     elif fcf_hist and fcf_hist[0] and fcf_hist[0] > 0:
         avg_earnings = fcf_hist[0]
     else:
-        # Fallback: use raw net income from EDGAR or estimate from margin × revenue
         ni = info.get("_net_income")
-        if ni is not None and ni > 0:
+        if ni and ni > 0:
             avg_earnings = ni
         else:
-            margin = info.get("profitMargins")
-            rev = info.get("revenue_current")
-            if margin is not None and rev is not None and rev > 0:
-                avg_earnings = margin * rev
-            else:
-                result.error = "Insufficient earnings data for EPV"
-                return result
+            result.error = "Insufficient earnings data"
+            return result
 
     if avg_earnings <= 0:
-        result.error = f"Negative normalized earnings — EPV not applicable"
+        result.error = "Negative normalized earnings"
         return result
 
-    # EPV = normalized earnings / cost of capital
-    # Then add excess cash, subtract debt
     epv_enterprise = avg_earnings / wacc
-
-    # Maintenance capex adjustment: EPV should use maintenance capex only
-    # (not growth capex). Heuristic: 70% of total capex is maintenance.
-    # This REDUCES EPV compared to using full FCF.
-    capex_raw = info.get("capitalExpenditures")
-    op_cf = info.get("_operating_cf")
-    if capex_raw and op_cf and op_cf > 0:
-        maintenance_capex = abs(capex_raw) * 0.60  # assume 60% is maintenance, 40% growth
-        adjusted_earnings = op_cf - maintenance_capex
-        if adjusted_earnings > 0:
-            epv_enterprise = adjusted_earnings / wacc
-    elif capex_raw and fcf_hist:
-        op_cf_est = fcf_hist[0] + abs(capex_raw)  # reconstruct operating CF
-        maintenance_capex = abs(capex_raw) * 0.60
-        adjusted_earnings = op_cf_est - maintenance_capex
-        if adjusted_earnings > 0:
-            epv_enterprise = adjusted_earnings / wacc
-
     net_debt = _estimate_net_debt(info)
     equity_value = epv_enterprise - net_debt
 
@@ -574,460 +746,225 @@ def _earnings_power_value(info: dict, wacc: float, shares: float) -> ModelResult
         "normalized_earnings": round(avg_earnings, 0),
         "wacc": wacc,
         "epv_enterprise": round(epv_enterprise, 0),
-        "net_debt": round(net_debt, 0),
     }
-    result.notes = f"Zero-growth value: normalized earnings ${avg_earnings/1e9:.1f}B / {wacc:.1%} WACC"
+    result.notes = f"Zero-growth valuation"
+    
     return result
 
 
 # ---------------------------------------------------------------------------
-# Model 4: Graham Number
+# Model 5: Graham Number
 # ---------------------------------------------------------------------------
 
 def _graham_number(info: dict, shares: float) -> ModelResult:
-    """Benjamin Graham's classic formula: sqrt(22.5 × EPS × BVPS).
-
-    Original: sqrt(15 × 1.5 × EPS × BVPS) = sqrt(22.5 × EPS × BVPS)
-    We use Graham's CONSERVATIVE variant: sqrt(15 × EPS × BVPS)
-    (drops the 1.5× bond multiplier that was era-specific).
-    """
+    """Graham Number: sqrt(22.5 × EPS × book_value_per_share)."""
     result = ModelResult(model_name="graham_number", weight=MODEL_WEIGHTS["graham_number"])
 
-    # EPS from net income / shares
-    net_income = info.get("_net_income")  # prefer raw EDGAR net income
-    fcf_hist = info.get("_fcf_history", [])
-
-    if net_income is None or net_income <= 0:
-        # Fallback: estimate from margin × revenue
-        margin = info.get("profitMargins")
-        rev = info.get("revenue_current")
-        if margin is not None and rev is not None and rev > 0:
-            net_income = margin * rev
-        elif fcf_hist and fcf_hist[0] and fcf_hist[0] > 0:
-            # Use FCF as earnings proxy (conservative)
-            net_income = fcf_hist[0]
-
-    if net_income is None or net_income <= 0 or shares <= 0:
-        result.error = "Need positive earnings for Graham Number"
+    eps = info.get("trailingEPS")
+    if not eps or eps <= 0:
+        result.error = "No EPS data"
         return result
 
-    eps = net_income / shares
-
-    # Book value per share from equity / shares
     equity = _get_equity(info)
-    if equity is None or equity <= 0:
-        result.error = "Need positive book value for Graham Number"
+    bvps = equity / shares if shares > 0 else 0.0
+    
+    if bvps <= 0:
+        result.error = "No book value"
         return result
 
-    bvps = equity / shares
-
-    # Graham's original formula: sqrt(22.5 × EPS × BVPS)
-    # 22.5 = 15 (max P/E) × 1.5 (max P/B) — the classic Graham Number
-    product = 22.5 * eps * bvps
-    if product <= 0:
-        result.error = "Negative EPS×BVPS product"
-        return result
-
-    graham_value = math.sqrt(product)
-    result.fair_value_per_share = round(graham_value, 2)
+    graham_value = math.sqrt(22.5 * eps * bvps)
+    
+    if shares > 0:
+        result.fair_value_per_share = round(graham_value, 2)
 
     result.inputs = {
-        "eps": round(eps, 2),
-        "bvps": round(bvps, 2),
-        "multiplier": 22.5,
+        "eps": eps,
+        "book_value_per_share": round(bvps, 2),
     }
-    result.notes = f"sqrt(22.5 × ${eps:.2f} EPS × ${bvps:.2f} BVPS) = ${graham_value:.2f}"
+    result.notes = f"Graham: sqrt(22.5 × {eps:.2f} × {bvps:.2f})"
+    
     return result
 
 
 # ---------------------------------------------------------------------------
-# Model 5: Excess Returns / Residual Income (Penman/Damodaran)
+# Model 6: Excess Returns / Residual Income
 # ---------------------------------------------------------------------------
 
 def _excess_returns(info: dict, wacc: float, shares: float) -> ModelResult:
-    """Value only the returns in excess of the cost of capital.
-
-    Intrinsic Value = Book Value + PV(Excess Returns)
-    where Excess Return = (ROIC − WACC) × Invested Capital
-
-    This model is powerful because:
-      - A company earning EXACTLY its cost of capital is worth BOOK VALUE
-      - Only excess returns (economic profit) deserve a premium
-      - Growth is only valuable if ROIC > WACC
-    """
+    """Penman-style Residual Income: PV of excess returns above WACC."""
     result = ModelResult(model_name="excess_returns", weight=MODEL_WEIGHTS["excess_returns"])
 
-    roic = info.get("roic")
     equity = _get_equity(info)
-
-    if roic is None or equity is None or equity <= 0:
-        result.error = "Need ROIC and positive equity for excess returns model"
+    fcf_hist = info.get("_fcf_history", [])
+    
+    if not fcf_hist or not fcf_hist[0] or fcf_hist[0] <= 0:
+        result.error = "No FCF data"
         return result
 
-    # Invested capital = equity + long-term debt
-    ltd = _get_long_term_debt(info)
-    invested_capital = equity + ltd
-
-    # Excess return = (ROIC - WACC) × invested capital
-    excess_return = (roic - wacc) * invested_capital
-
+    current_fcf = fcf_hist[0]
+    roi = current_fcf / equity if equity > 0 else 0.0
+    excess_return = max(0.0, roi - wacc)  # only count returns above WACC
+    
     if excess_return <= 0:
-        # Company doesn't earn above cost of capital — worth book value at best
-        if shares > 0:
-            result.fair_value_per_share = round(equity / shares, 2)
-        result.notes = f"ROIC {roic:.1%} ≤ WACC {wacc:.1%} — worth ~book value"
-        result.inputs = {
-            "roic": round(roic, 4),
-            "wacc": wacc,
-            "invested_capital": round(invested_capital, 0),
-            "excess_return": round(excess_return, 0),
-        }
+        # Company is not earning above its cost of capital
+        result.error = "ROI below WACC"
         return result
 
-    # PV of excess returns (assume they fade over time)
-    # 8% annual fade over 20 years — reflects realistic competitive-moat duration
-    # (Morningstar uses 10-15 yr; Damodaran varies by industry)
-    fade_rate = 0.08
-    pv_excess = 0.0
-    annual_excess = excess_return
-    for yr in range(1, 21):  # 20-year horizon
-        annual_excess *= (1 - fade_rate)
-        pv_excess += annual_excess / (1 + wacc) ** yr
-
-    # Intrinsic value = book value + PV(excess returns)
-    intrinsic = equity + pv_excess
-
-    if shares > 0 and intrinsic > 0:
-        result.fair_value_per_share = round(intrinsic / shares, 2)
-
-    result.inputs = {
-        "roic": round(roic, 4),
-        "wacc": wacc,
-        "invested_capital": round(invested_capital, 0),
-        "excess_return": round(excess_return, 0),
-        "fade_rate": fade_rate,
-        "pv_excess": round(pv_excess, 0),
-    }
-    result.notes = (
-        f"ROIC {roic:.1%} − WACC {wacc:.1%} = {roic-wacc:.1%} spread | "
-        f"Excess return ${excess_return/1e9:.1f}B, fading 10%/yr"
-    )
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Model 6: Dividend Discount Model (Gordon Growth)
-# ---------------------------------------------------------------------------
-
-def _dividend_discount(info: dict, wacc: float, shares: float) -> ModelResult:
-    """Gordon Growth DDM for dividend-paying stocks.
-
-    Only applied if the company pays dividends. Uses a pessimistic payout ratio.
-    """
-    result = ModelResult(model_name="ddm", weight=MODEL_WEIGHTS["ddm"])
-
-    # We need dividend info — check if available from the fundamentals
-    # Since we're using EDGAR, we don't have direct dividend data easily.
-    # Use FCF × conservative payout ratio as a proxy for sustainable dividend.
-    fcf_hist = info.get("_fcf_history", [])
-    if not fcf_hist or fcf_hist[0] is None or fcf_hist[0] <= 0:
-        result.error = "No positive FCF — DDM not applicable"
-        result.weight = 0
-        return result
-
-    # Assume company distributes 50% of FCF (dividends + buybacks) to equity holders
-    # This is close to the S&P 500 long-run average total shareholder yield.
-    payout_ratio = 0.50
-    sustainable_dividend = fcf_hist[0] * payout_ratio
-
-    if shares <= 0:
-        result.error = "No shares outstanding"
-        return result
-
-    dps = sustainable_dividend / shares  # dividend per share
-
-    # Growth rate for dividends — very conservative
-    rev_growth = info.get("revenue_growth")
-    div_growth = min(TERMINAL_GROWTH_RATE, (rev_growth or 0) * 0.5)
-    div_growth = max(0.0, min(0.03, div_growth))
-
-    cost_of_equity = wacc + 0.01  # use slightly higher than WACC for equity-only
-    if cost_of_equity <= div_growth:
-        result.error = "Cost of equity ≤ dividend growth (invalid)"
-        return result
-
-    fair_value = dps / (cost_of_equity - div_growth)
-
-    if fair_value > 0:
-        result.fair_value_per_share = round(fair_value, 2)
-
-    result.inputs = {
-        "sustainable_dividend_total": round(sustainable_dividend, 0),
-        "dps": round(dps, 2),
-        "payout_ratio": payout_ratio,
-        "div_growth": round(div_growth, 4),
-        "cost_of_equity": round(cost_of_equity, 4),
-    }
-    result.notes = f"DPS=${dps:.2f} (50% of FCF) growing at {div_growth:.1%}, CoE={cost_of_equity:.1%}"
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Model 7: Relative Valuation (Conservative P/E)
-# ---------------------------------------------------------------------------
-
-def _relative_pe(info: dict, shares: float) -> ModelResult:
-    """Conservative relative P/E valuation.
-
-    Uses a CONSERVATIVE target P/E (capped at 18x) × normalized EPS.
-    Morningstar often assigns 25-35x P/E for growth stocks.
-    We cap at 18x for all companies (Graham's recommendation for a
-    "moderately priced" stock).
-    """
-    result = ModelResult(model_name="relative_pe", weight=MODEL_WEIGHTS["relative_pe"])
-
-    # Normalized EPS: average of last 2-3 years earnings / shares
-    margin = info.get("profitMargins")
-    rev = info.get("revenue_current")
-    rev_prior = info.get("revenue_prior")
-    fcf_hist = info.get("_fcf_history", [])
-
-    earnings_estimates = []
-    if margin is not None and rev is not None and rev > 0:
-        earnings_estimates.append(margin * rev)
-    if margin is not None and rev_prior is not None and rev_prior > 0:
-        earnings_estimates.append(margin * rev_prior)
-    if fcf_hist and fcf_hist[0] and fcf_hist[0] > 0:
-        earnings_estimates.append(fcf_hist[0])
-
-    if not earnings_estimates or shares <= 0:
-        result.error = "Insufficient data for relative P/E"
-        return result
-
-    normalized_earnings = sum(earnings_estimates) / len(earnings_estimates)
-    if normalized_earnings <= 0:
-        result.error = "Negative normalized earnings"
-        return result
-
-    normalized_eps = normalized_earnings / shares
-
-    # Target P/E assignment — graduated by quality and growth
-    # Anchored to: Graham's 15x no-growth floor, ~25x ceiling for high-quality growers
-    # (Morningstar freely assigns 30-40x; we cap at 25x to stay realistic, not heroic)
-    roic = info.get("roic")
-    rev_growth = info.get("revenue_growth") or 0
-
-    if roic and roic > 0.20 and rev_growth > 0.10:
-        target_pe = 25.0  # wide-moat compounder with strong growth
-    elif roic and roic > 0.20 and rev_growth > 0.05:
-        target_pe = 22.0  # wide moat, moderate growth
-    elif roic and roic > 0.15 and rev_growth > 0.05:
-        target_pe = 20.0  # good ROIC, growing
-    elif roic and roic > 0.15:
-        target_pe = 18.0  # good ROIC, flat revenue
-    elif roic and roic > 0.10:
-        target_pe = 16.0  # average quality
-    else:
-        target_pe = 15.0  # Graham's baseline for a no-moat company
-
-    # Moderate premium check: if market P/E is extremely stretched, stay disciplined
-    current_pe = info.get("trailingPE")
-    if current_pe and current_pe > 50:
-        target_pe = min(target_pe, 18.0)  # market is euphoric — cap at 18x
-
-    fair_value = normalized_eps * target_pe
-
-    if fair_value > 0:
-        result.fair_value_per_share = round(fair_value, 2)
-
-    result.inputs = {
-        "normalized_eps": round(normalized_eps, 2),
-        "target_pe": target_pe,
-        "current_pe": round(current_pe, 1) if current_pe else None,
-    }
-    result.notes = f"${normalized_eps:.2f} normalized EPS × {target_pe:.0f}x conservative P/E"
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Model 8: Asset-Based Floor (Tangible Book Value)
-# ---------------------------------------------------------------------------
-
-def _asset_floor(info: dict, shares: float) -> ModelResult:
-    """Tangible book value per share as an absolute floor.
-
-    A stock should not trade below its tangible book value unless the
-    business is destroying value (negative ROIC).
-    """
-    result = ModelResult(model_name="asset_floor", weight=MODEL_WEIGHTS["asset_floor"])
-
-    equity = _get_equity(info)
-    if equity is None or shares <= 0:
-        result.error = "No equity / shares data"
-        return result
-
-    # Use book value directly (we don't have goodwill breakdown from EDGAR easily)
-    bvps = equity / shares
-
-    # For asset floor, use 80% of book (conservative — some assets may be impaired)
-    conservative_bvps = bvps * 0.80
-
-    if conservative_bvps > 0:
-        result.fair_value_per_share = round(conservative_bvps, 2)
+    # PV of excess returns
+    pv_excess = (current_fcf * excess_return / wacc) / (1 + wacc)
+    pv_base = equity  # book value
+    equity_value = pv_base + pv_excess
+    
+    if shares > 0:
+        result.fair_value_per_share = round(equity_value / shares, 2)
 
     result.inputs = {
         "equity": round(equity, 0),
-        "bvps": round(bvps, 2),
-        "haircut": 0.80,
+        "roi": roi,
+        "excess_return": excess_return,
     }
-    result.notes = f"Book value ${bvps:.2f}/sh × 80% haircut = ${conservative_bvps:.2f} floor"
+    result.notes = f"ROI {roi:.0%}, Excess {excess_return:.0%}"
+    
     return result
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Model 7: Dividend Discount Model (Gordon Growth)
 # ---------------------------------------------------------------------------
 
-def _estimate_net_debt(info: dict) -> float:
-    """Estimate net debt (total debt − cash) from available data.
+def _dividend_discount(info: dict, wacc: float, shares: float) -> ModelResult:
+    """Gordon Growth Model: value of dividend/FCF stream."""
+    result = ModelResult(model_name="ddm", weight=MODEL_WEIGHTS["ddm"])
 
-    Uses raw EDGAR balance sheet items when available (preferred),
-    falls back to D/E ratio heuristic.
-    """
-    # Prefer raw EDGAR data
-    total_debt = info.get("_total_debt")
-    cash = info.get("_cash")
+    # Use FCF yield as proxy for dividend
+    fcf_hist = info.get("_fcf_history", [])
+    market_cap = info.get("marketCap")
+    
+    if not fcf_hist or not fcf_hist[0] or fcf_hist[0] <= 0 or not market_cap or market_cap <= 0:
+        result.error = "No FCF or market cap"
+        return result
 
-    if total_debt is not None and cash is not None:
-        return max(0, total_debt - cash)
+    current_fcf = fcf_hist[0]
+    fcf_yield = current_fcf / market_cap
+    
+    # Terminal growth
+    terminal_growth = min(TERMINAL_GROWTH_RATE, 0.03)
+    
+    if wacc <= terminal_growth:
+        result.error = "WACC ≤ terminal growth"
+        return result
 
-    if total_debt is not None:
-        # Have debt but no cash — conservatively assume minimal cash
-        return max(0, total_debt * 0.90)
+    # Intrinsic value per share = (current_yield × price) / (wacc - g)
+    # Simplifies to: equity_value = (fcf / (wacc - g))
+    equity_value = current_fcf / (wacc - terminal_growth)
+    
+    if shares > 0:
+        result.fair_value_per_share = round(equity_value / shares, 2)
 
-    # Fallback: estimate from D/E ratio
-    de_raw = info.get("debtToEquity")
+    result.inputs = {
+        "fcf_current": round(current_fcf, 0),
+        "fcf_yield": round(fcf_yield, 4),
+        "terminal_growth": terminal_growth,
+        "wacc": wacc,
+    }
+    result.notes = f"FCF yield {fcf_yield:.2%}, {terminal_growth:.0%} growth"
+    
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Model 8: Relative PE (Sector Comparison)
+# ---------------------------------------------------------------------------
+
+def _relative_pe(info: dict, shares: float) -> ModelResult:
+    """Sector-relative P/E: conservative median-sector P/E × normalized EPS."""
+    result = ModelResult(model_name="relative_pe", weight=MODEL_WEIGHTS["relative_pe"])
+
+    # Use sector median P/E (fallback to S&P 500 median ~21)
+    sector_pe = info.get("sector_pe")
+    if not sector_pe or sector_pe <= 0:
+        sector_pe = 20.0  # conservative default
+
+    eps = info.get("trailingEPS")
+    if not eps or eps <= 0:
+        result.error = "No EPS data"
+        return result
+
+    # Conservative: use 70% of sector P/E
+    conservative_pe = sector_pe * 0.70
+    equity_value = conservative_pe * eps * shares if shares > 0 else 0.0
+    
+    if shares > 0 and equity_value > 0:
+        result.fair_value_per_share = round(equity_value / shares, 2)
+
+    result.inputs = {
+        "sector_pe": round(sector_pe, 2),
+        "conservative_pe": round(conservative_pe, 2),
+        "eps": eps,
+    }
+    result.notes = f"Sector P/E {sector_pe:.1f}x, using {conservative_pe:.1f}x"
+    
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Model 9: Asset Floor (Book Value)
+# ---------------------------------------------------------------------------
+
+def _asset_floor(info: dict, shares: float) -> ModelResult:
+    """Asset-based floor: tangible book value per share."""
+    result = ModelResult(model_name="asset_floor", weight=MODEL_WEIGHTS["asset_floor"])
+
     equity = _get_equity(info)
+    if equity <= 0:
+        result.error = "No equity data"
+        return result
 
-    if de_raw is not None and equity is not None and equity > 0:
-        total_liabilities = (de_raw / 100.0) * equity
-        est_cash = cash if cash is not None else equity * 0.10
-        return max(0, total_liabilities * 0.50 - est_cash)
+    # Adjust for intangibles (goodwill, patents)
+    goodwill = info.get("goodwill") or 0.0
+    intangibles = info.get("intangibleAssets") or 0.0
+    tangible_equity = equity - goodwill - intangibles
+    
+    if tangible_equity <= 0:
+        # Use raw equity if tangible is negative
+        tangible_equity = equity * 0.5  # conservative haircut
 
-    return 0.0
+    if shares > 0:
+        result.fair_value_per_share = round(tangible_equity / shares, 2)
 
-
-def _get_equity(info: dict) -> Optional[float]:
-    """Extract stockholders' equity from info dict."""
-    # Prefer raw EDGAR equity
-    raw_equity = info.get("_equity")
-    if raw_equity is not None and raw_equity > 0:
-        return raw_equity
-
-    # Fallback: back-calculate from ROE and net income
-    roe = info.get("returnOnEquity")
-    margin = info.get("profitMargins")
-    rev = info.get("revenue_current")
-    if roe and roe > 0 and margin is not None and rev and rev > 0:
-        net_income = margin * rev
-        return net_income / roe
-    return None
-
-
-def _get_long_term_debt(info: dict) -> float:
-    """Get long-term debt from raw EDGAR data or estimate from D/E ratio."""
-    # Prefer raw EDGAR data
-    raw_ltd = info.get("_long_term_debt")
-    if raw_ltd is not None:
-        return raw_ltd
-
-    # Fallback: estimate from D/E
-    equity = _get_equity(info)
-    de_raw = info.get("debtToEquity")
-    if equity and de_raw:
-        return equity * (de_raw / 100.0) * 0.5
-    return 0.0
+    result.inputs = {
+        "equity": round(equity, 0),
+        "goodwill": round(goodwill, 0),
+        "tangible_equity": round(tangible_equity, 0),
+    }
+    result.notes = f"Tangible book value floor"
+    
+    return result
 
 
 # ---------------------------------------------------------------------------
-# Composite valuation engine — public API
+# Main Valuation Function
 # ---------------------------------------------------------------------------
 
-def _weighted_median(values: list[tuple[float, float]]) -> float:
-    """Compute weighted median from list of (value, weight) tuples."""
-    if not values:
-        return 0.0
-
-    # Sort by value
-    values = sorted(values, key=lambda x: x[0])
-
-    total_weight = sum(w for _, w in values)
-    if total_weight <= 0:
-        return values[len(values) // 2][0]
-
-    cumulative = 0.0
-    for val, weight in values:
-        cumulative += weight
-        if cumulative >= total_weight / 2:
-            return val
-    return values[-1][0]
-
-
-def _weighted_percentile(values: list[tuple[float, float]], pct: float) -> float:
-    """Compute weighted percentile."""
-    if not values:
-        return 0.0
-    values = sorted(values, key=lambda x: x[0])
-    total_weight = sum(w for _, w in values)
-    if total_weight <= 0:
-        return values[0][0]
-    target = total_weight * pct
-    cumulative = 0.0
-    for val, weight in values:
-        cumulative += weight
-        if cumulative >= target:
-            return val
-    return values[-1][0]
-
-
-def valuate(symbol: str, info: dict, current_price: Optional[float] = None,
-            shares_outstanding: Optional[float] = None) -> ValuationResult:
-    """Run all valuation models and produce a composite fair value.
-
-    Parameters
-    ----------
-    symbol : str
-        Ticker symbol.
-    info : dict
-        Fundamentals dict from edgar.get_fundamentals().
-    current_price : float, optional
-        Current market price per share.
-    shares_outstanding : float, optional
-        Total shares outstanding.
-
-    Returns
-    -------
-    ValuationResult
-        Comprehensive valuation with fair value, buy price, and signal.
-    """
+def valuate(
+    symbol: str,
+    info: dict,
+    current_price: Optional[float] = None,
+    shares_outstanding: Optional[float] = None
+) -> ValuationResult:
+    """Run all valuation models and produce a composite fair value, plus Zacks-style rank."""
     result = ValuationResult(symbol=symbol.upper())
     result.current_price = current_price
     result.shares_outstanding = shares_outstanding
 
-    # We need shares outstanding for per-share values
+    # Estimate shares outstanding if needed
     shares = shares_outstanding or 0
     if shares <= 0:
-        # Try to back out from market cap / price
         mcap = info.get("marketCap")
         if mcap and current_price and current_price > 0:
             shares = mcap / current_price
-
-    if shares <= 0:
-        result.valuation_signal = "INSUFFICIENT_DATA"
-        result.summary = "Cannot value — shares outstanding unknown"
-        return result
-
-    result.shares_outstanding = shares
+        else:
+            shares = 1.0  # fallback
 
     # Estimate WACC
     wacc = _estimate_wacc(info)
@@ -1037,6 +974,11 @@ def valuate(symbol: str, info: dict, current_price: Optional[float] = None,
     result.quality_score = quality_score
     result.quality_tier = quality_tier
     result.moat_indicators = moat_indicators
+
+    # Zacks Rank
+    zacks_rank, zacks_label = _zacks_rank(info)
+    result.zacks_rank = zacks_rank
+    result.zacks_label = zacks_label
 
     # Set margin of safety based on quality
     if quality_tier == "HIGH":
@@ -1048,6 +990,7 @@ def valuate(symbol: str, info: dict, current_price: Optional[float] = None,
 
     # ── Run all models ────────────────────────────────────────────────────
     models = [
+        _dcf_three_stage(info, wacc, shares),
         _dcf_two_stage(info, wacc, shares),
         _earnings_power_value(info, wacc, shares),
         _graham_number(info, shares),
@@ -1095,9 +1038,7 @@ def valuate(symbol: str, info: dict, current_price: Optional[float] = None,
                 (current_price / result.buy_price - 1) * 100, 1
             )
 
-        # Valuation signal — deliberately harsher than Morningstar
-        # Morningstar: "buy" if price < fair value
-        # Us: "buy" only if price < fair_value × (1 − MoS)
+        # Valuation signal — Morningstar style
         if current_price <= result.buy_price:
             if upside >= 60:
                 result.valuation_signal = "DEEP_VALUE"
@@ -1138,14 +1079,15 @@ def valuate(symbol: str, info: dict, current_price: Optional[float] = None,
             f"{sig} | Fair Value ${fv:,.2f} | Buy Below ${bp:,.2f} "
             f"(MoS {result.margin_of_safety_pct:.0%}) | "
             f"Price ${cp:,.2f} → {up:+.1f}% upside | "
-            f"Quality: {quality_tier} ({quality_score:.0f}/100)"
+            f"Quality: {quality_tier} ({quality_score:.0f}/100) | "
+            f"Zacks: {zacks_rank} ({zacks_label})"
         )
     else:
-        result.summary = f"Fair Value ${fv:,.2f} | Quality: {quality_tier}" if fv else "Insufficient data"
+        result.summary = f"Fair Value ${fv:,.2f} | Quality: {quality_tier} | Zacks: {zacks_rank} ({zacks_label})" if fv else "Insufficient data"
 
     logger.info(
-        "%s: valuation — FV=$%.2f, buy=$%.2f, price=$%.2f, upside=%.1f%%, signal=%s, quality=%s",
-        symbol, fv or 0, bp or 0, cp or 0, up, sig, quality_tier,
+        "%s: valuation — FV=$%.2f, buy=$%.2f, price=$%.2f, upside=%.1f%%, signal=%s, quality=%s, zacks=%s",
+        symbol, fv or 0, bp or 0, cp or 0, up, sig, quality_tier, zacks_label,
     )
 
     return result

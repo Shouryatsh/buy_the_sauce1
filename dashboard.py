@@ -72,6 +72,7 @@ from risk_manager import (
     TrailingStopState, evaluate_partial_exits, check_time_stop,
 )
 from run_screen import WATCHLIST
+from volatility_scanner import scan_volatile_stocks, volatile_stocks_to_df
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -930,6 +931,7 @@ app.layout = html.Div(
                 dbc.Tab(label="📒  My Trades",      tab_id="tab-trades"),
                 dbc.Tab(label="💎  Valuation",      tab_id="tab-valuation"),
                 dbc.Tab(label="🏠  System Overview", tab_id="tab-overview"),
+                dbc.Tab(label="🌊  Volatile & Quality", tab_id="tab-volatile"),
             ], style={"marginBottom": "20px"}),
 
             html.Div(id="tab-content"),
@@ -4096,6 +4098,91 @@ def _build_screener_tables(df: pd.DataFrame):
 
 
 # ---------------------------------------------------------------------------
+# Tab 7 — Volatile & Quality layout
+# ---------------------------------------------------------------------------
+
+def _volatile_layout():
+    return html.Div([
+        dbc.Row([
+            dbc.Col(
+                dbc.Button("🔄 Scan Volatile Stocks", id="volatile-scan-btn",
+                           color="primary", size="sm",
+                           style={"fontFamily": "monospace"},
+                           title="Scan watchlist for stocks oscillating ±20% in 6 months with good fundamentals"),
+                width="auto",
+            ),
+            dbc.Col(
+                html.Span(id="volatile-status", style={"color": "#888", "fontSize": "0.85rem"}),
+                width="auto", className="d-flex align-items-center",
+            ),
+        ], className="mb-3", justify="start"),
+        html.P(
+            "Stocks that oscillated ≥20% (peak-to-trough) in the last 6 months "
+            "while passing the fundamental quality screen.  "
+            "MA Level shows position relative to the 200-day moving average.",
+            style={"color": "#aaa", "fontSize": "0.85rem", "marginBottom": "12px"},
+        ),
+        html.Div(id="volatile-table-container",
+                 children=html.P("Click 🔄 Scan to load.", style={"color": "#666"})),
+    ])
+
+
+@app.callback(
+    Output("volatile-table-container", "children"),
+    Output("volatile-status", "children"),
+    Input("volatile-scan-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def _run_volatile_scan(n_clicks):
+    import datetime as _dt
+    ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        stocks = scan_volatile_stocks(WATCHLIST, require_fundamental_pass=False)
+        df = volatile_stocks_to_df(stocks)
+        if df.empty:
+            return (
+                html.P("No stocks matched the ±20% oscillation criteria.",
+                       style={"color": "#f88"}),
+                html.Span(f"✅ Scan complete — {ts} (0 matches)")
+            )
+
+        table = dash_table.DataTable(
+            data=df.to_dict("records"),
+            columns=[{"name": c, "id": c} for c in df.columns],
+            style_table={"overflowX": "auto"},
+            style_header={"backgroundColor": "#1a1a2e", "color": "#e0e0e0",
+                          "fontWeight": "bold", "fontFamily": "monospace",
+                          "fontSize": "0.8rem"},
+            style_cell={"backgroundColor": "#16213e", "color": "#e0e0e0",
+                        "fontFamily": "monospace", "fontSize": "0.8rem",
+                        "padding": "6px 10px", "textAlign": "center"},
+            style_data_conditional=[
+                {"if": {"filter_query": '{Fund Pass} = "✅"'},
+                 "backgroundColor": "#1a3a1a"},
+                {"if": {"filter_query": '{Fund Pass} = "❌"'},
+                 "backgroundColor": "#3a1a1a"},
+                {"if": {"filter_query": '{MA Level} contains "Well Below"'},
+                 "color": "#ff6b6b"},
+                {"if": {"filter_query": '{MA Level} contains "Well Above"'},
+                 "color": "#6bff6b"},
+            ],
+            sort_action="native",
+            filter_action="native",
+            page_size=30,
+        )
+        return (
+            table,
+            html.Span(f"✅ Scan complete — {ts}  ({len(df)} stocks)",
+                       style={"color": "#6bff6b"})
+        )
+    except Exception as exc:
+        return (
+            html.P(f"Scan error: {exc}", style={"color": "#f88"}),
+            html.Span(f"❌ Error — {ts}", style={"color": "#ff6b6b"})
+        )
+
+
+# ---------------------------------------------------------------------------
 # Callback: Tab switching
 # ---------------------------------------------------------------------------
 
@@ -4121,6 +4208,8 @@ def render_tab(active_tab, screen_data):
         return _valuation_tab_layout()
     elif active_tab == "tab-overview":
         return _overview_layout()
+    elif active_tab == "tab-volatile":
+        return _volatile_layout()
     return html.Div("Select a tab.", style={"color": MUTED})
 
 
