@@ -1,0 +1,15 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Dashboard",
+			"type": "shell",
+			"command": "python3",
+			"args": [
+				"dashboard.py"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}
