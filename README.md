@@ -171,6 +171,67 @@ pytest tests/ -v
 
 ---
 
+---
+
+## Options Wheel Dashboard (Phase 1)
+
+A second, independent tool in this repo: a **decision-support dashboard**
+for a cash-secured-put → covered-call wheel strategy run on IBKR. It
+screens, scores, and recommends — a human clicks execute. It does not share
+config, watchlist, or capital targets with the dip-buying bot above.
+
+```
+wheel_dashboard.py         ← Streamlit UI tying everything together
+ ├─ wheel_fundamentals.py  ← Quality Score (0-100) + FCF/ROE/margin screen (SEC EDGAR)
+ ├─ wheel_options.py       ← Option chain pull, Black-Scholes greeks, richness proxy
+ ├─ wheel_risk.py          ← Raw / delta-adjusted / stress exposure, concentration checks
+ ├─ wheel_recommend.py     ← Composite ranking + capital sizing
+ ├─ wheel_ibkr.py          ← Read-only account/positions/orders/trade-history pull
+ └─ wheel_db.py            ← SQLite archive for screener history + trade log
+
+wheel_config.py            ← Capital targets, thresholds, score weights
+wheel_watchlist.py         ← Tickers to screen (must be <= MAX_ASSIGNMENT_PRICE)
+
+wheel_skew.py              ← [Phase 2 stub] full IV smile/skew diagnostics
+wheel_jump_diffusion.py    ← [Phase 3 stub] Merton jump-diffusion fair-value IV
+wheel_execution.py         ← [Phase 5 stub] manual-confirm order staging
+```
+
+### Run it
+
+```bash
+pip install -r requirements.txt
+streamlit run wheel_dashboard.py
+```
+
+### Dependencies / known limitations
+
+- **TWS or IB Gateway must be running locally with API access enabled.** The
+  dashboard connects read-only, on its own client id (`wheel_config.IBKR_CLIENT_ID`)
+  so it can run alongside the dip bot against the same TWS instance.
+- **Live/delayed options data (OPRA subscription) is needed for real
+  greeks/IV.** Without one, IBKR reports no model greeks and the dashboard
+  falls back to a Black-Scholes delta computed from realized volatility —
+  shown as an estimate, never mixed in with broker-reported values silently.
+- **Fundamentals come from SEC EDGAR, not yfinance**, matching the decision
+  already made for the dip bot in this repo (see `requirements.txt`) — EDGAR
+  is free, official, and doesn't rate-limit as aggressively. EDGAR's TTM data
+  can still be noisy or incomplete for some names; any symbol with missing
+  FCF/margin/ROE is scored but flagged `data_reliable=False` rather than
+  silently treated as a fail.
+- **Realized P&L / win rate are approximate.** IBKR's execution API
+  (`reqExecutions`) only retains recent fills; `wheel_db.py` archives fills
+  locally as they're seen so history survives past that window, but a full
+  backfill would need IBKR's Flex Query API (paid-account feature).
+- **Phase 1 exposure and richness figures are Black-Scholes proxies**, not
+  broker-reported or Merton-calibrated. They're labeled as such in the
+  dashboard and get refined in Phase 3 (jump-diffusion fair value) and
+  Phase 4 (live greeks, full risk module).
+- **Nothing in this tool submits an order.** The Ranked Recommendations
+  panel's "Execute" button is disabled until Phase 5.
+
+---
+
 ## Disclaimer
 
 This software is provided for educational and research purposes only.

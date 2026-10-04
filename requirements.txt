@@ -6,3 +6,10 @@ requests>=2.31.0             # SEC EDGAR XBRL API calls
 schedule>=1.2.1
 pytest>=8.1.1
 # yfinance removed — fundamentals now from SEC EDGAR, prices from Stooq
+
+# --- Options wheel dashboard (wheel_*.py) ---
+scipy>=1.11.0                # Black-Scholes greeks (norm.cdf)
+streamlit>=1.32.0             # dashboard UI
+plotly>=5.20.0                # IV/richness charts
+# QuantLib intentionally omitted — Phase 3 Merton calibration starts with a
+# pure numpy/scipy fit; add quantlib-python only if that proves insufficient.

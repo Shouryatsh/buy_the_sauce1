@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
 from functools import lru_cache
 from typing import Optional
@@ -40,7 +41,37 @@ EDGAR_TICKERS_URL    = "https://www.sec.gov/files/company_tickers.json"
 EDGAR_FACTS_URL      = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 EDGAR_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
 
-_RATE_LIMIT_SLEEP = 0.12   # ~8 req/s — well under SEC's 10/s limit
+_RATE_LIMIT_SLEEP = 0.12   # ~8 req/s — well under SEC's 10/s limit, single-threaded callers
+
+
+class _RateLimiter:
+    """Thread-safe token-pacing limiter shared across every caller.
+
+    A plain `time.sleep(x)` before each request only limits *one* thread's
+    own request rate; running screen_wheel_candidate for hundreds of
+    symbols across a thread pool (wheel_universe.py) would otherwise let
+    each worker sleep independently and the *combined* rate across all of
+    them blow well past SEC's ~10 req/s guidance. This limiter tracks one
+    shared "next allowed time" so the aggregate rate stays capped no matter
+    how many threads are calling in concurrently.
+    """
+
+    def __init__(self, requests_per_second: float) -> None:
+        self._interval = 1.0 / requests_per_second
+        self._lock = threading.Lock()
+        self._next_time = 0.0
+
+    def acquire(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            wait = self._next_time - now
+            if wait > 0:
+                time.sleep(wait)
+                now = self._next_time
+            self._next_time = max(now, self._next_time) + self._interval
+
+
+_sec_rate_limiter = _RateLimiter(8.0)   # ~8 req/s system-wide, however many threads are calling
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +80,13 @@ _RATE_LIMIT_SLEEP = 0.12   # ~8 req/s — well under SEC's 10/s limit
 
 @lru_cache(maxsize=1)
 def _load_ticker_map() -> dict:
-    """Download SEC's full ticker→CIK map once and cache it."""
+    """Download SEC's full ticker→CIK map once and cache it.
+
+    The returned dict preserves SEC's own ordering, which is roughly
+    market-cap descending (NVDA, AAPL, GOOGL, MSFT, AMZN, ... in practice) --
+    wheel_universe.py relies on this to build a "top N by size" universe
+    without needing a separate paid index-constituent data source.
+    """
     try:
         resp = requests.get(EDGAR_TICKERS_URL, headers=EDGAR_HEADERS, timeout=15)
         resp.raise_for_status()
@@ -58,6 +95,13 @@ def _load_ticker_map() -> dict:
     except Exception as exc:
         logger.error("Could not load SEC ticker map: %s", exc)
         return {}
+
+
+def get_ticker_universe(n: Optional[int] = None) -> list[str]:
+    """Return SEC-registered tickers in their roughly market-cap-descending
+    order, optionally truncated to the first *n*."""
+    tickers = list(_load_ticker_map().keys())
+    return tickers[:n] if n else tickers
 
 
 def _get_cik(symbol: str) -> Optional[int]:
@@ -74,7 +118,7 @@ def _get_cik(symbol: str) -> Optional[int]:
 def _get_sic(cik: int) -> Optional[str]:
     """Return the 4-digit SIC code string for a company, or None on failure."""
     try:
-        time.sleep(_RATE_LIMIT_SLEEP)
+        _sec_rate_limiter.acquire()
         url = EDGAR_SUBMISSIONS_URL.format(cik=cik)
         resp = requests.get(url, headers=EDGAR_HEADERS, timeout=15)
         resp.raise_for_status()
@@ -90,25 +134,41 @@ def _get_sic(cik: int) -> Optional[str]:
 
 def _fetch_company_facts(cik: int) -> dict:
     url = EDGAR_FACTS_URL.format(cik=cik)
-    time.sleep(_RATE_LIMIT_SLEEP)
+    _sec_rate_limiter.acquire()
     resp = requests.get(url, headers=EDGAR_HEADERS, timeout=20)
     resp.raise_for_status()
     return resp.json()
 
 
-def _get_annual_values(facts: dict, concept: str, unit: str = "USD") -> list:
-    """Extract most-recent annual (10-K) filed values for an XBRL concept.
+def _get_annual_values(
+    facts: dict,
+    concept: str,
+    unit: str = "USD",
+    taxonomy: str = "us-gaap",
+    forms: tuple = ("10-K", "10-K/A"),
+) -> list:
+    """Extract the most-recent filed value per fiscal year for an XBRL
+    concept, from the given *taxonomy* and *forms*.
 
-    Returns a list ordered newest → oldest, up to 5 years.
+    Returns a list ordered newest -> oldest, up to 5 fiscal years.
+
+    Almost every income-statement/cash-flow/balance-sheet concept lives
+    under the "us-gaap" taxonomy and is only meaningful annually (10-K),
+    hence those defaults. Shares outstanding is the notable exception: many
+    large caps (confirmed: JNJ, XOM, META, V) report
+    EntityCommonStockSharesOutstanding under the "dei" (Document Entity
+    Information) taxonomy instead, updated every quarter on the 10-Q cover
+    page -- restricting to us-gaap/10-K silently drops market cap (and
+    everything downstream of it: FCF yield, trailing P/E) for those names.
     """
     try:
-        entries = facts["facts"]["us-gaap"][concept]["units"][unit]
+        entries = facts["facts"][taxonomy][concept]["units"][unit]
     except KeyError:
         return []
 
     annual: dict = {}
     for e in entries:
-        if e.get("form") in ("10-K", "10-K/A") and e.get("val") is not None:
+        if e.get("form") in forms and e.get("val") is not None:
             fy = str(e.get("fy") or e.get("end", "")[:4])
             if fy and (fy not in annual or e["filed"] > annual[fy][1]):
                 annual[fy] = (float(e["val"]), e["filed"])
@@ -136,6 +196,23 @@ def _fetch_price_from_ibkr(symbol: str, period_years: int = 2) -> Optional[pd.Da
     if TWS is not running or the request fails.
     """
     try:
+        # ib_insync (and eventkit, which it imports) needs a thread-local
+        # asyncio event loop -- eventkit even calls get_event_loop() at
+        # *import* time, so this must run before `from ib_insync import
+        # ...`, not after. A loop only exists automatically on the main
+        # thread; callers like the wheel dashboard (via Streamlit) run this
+        # on a worker thread that never gets one. This connection is fully
+        # self-contained within this function call (connect, fetch,
+        # disconnect, all here, no reuse across calls), so a plain
+        # per-thread loop is enough -- unlike wheel_ibkr.py's persistent
+        # connection, there's no "which thread owns the live socket"
+        # problem to worry about here.
+        import asyncio
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
+
         from ib_insync import IB, Stock, util
         import config as _cfg
         ib = IB()
@@ -198,7 +275,7 @@ def get_price_history(symbol: str, period_years: int = 2) -> tuple[Optional[pd.D
 # Main fundamentals builder
 # ---------------------------------------------------------------------------
 
-def get_fundamentals(symbol: str) -> dict:
+def get_fundamentals(symbol: str, latest_price: Optional[float] = None) -> dict:
     """Return a fundamentals dict for *symbol* sourced from SEC EDGAR.
 
     Keys returned (mirror what screener.py reads)
@@ -212,6 +289,16 @@ def get_fundamentals(symbol: str) -> dict:
     capitalExpenditures – capex as a negative number (convention)
     _fcf_history        – [FCF_yr0, FCF_yr1, ...] newest→oldest (for trend check)
     _sic                – 4-digit SIC string (for sector-aware D/E in screener)
+
+    Parameters
+    ----------
+    latest_price:
+        If given, used directly for market cap instead of calling
+        get_price_history() internally. Bulk callers screening hundreds of
+        symbols (wheel_universe.py) fetch prices in a handful of batched
+        yfinance calls up front and pass them in here -- IBKR's
+        historical-data pacing limits and Stooq's now-blocked CSV export
+        make a fresh per-symbol price lookup impractical at that scale.
     """
     result: dict = {}
     cik = _get_cik(symbol)
@@ -279,6 +366,10 @@ def get_fundamentals(symbol: str) -> dict:
     if net_income_vals and revenue_vals and revenue_vals[0]:
         result["profitMargins"] = net_income_vals[0] / revenue_vals[0]
 
+    # --- History arrays (newest -> oldest) for trend scoring, e.g. wheel_fundamentals.py ---
+    result["_net_income_history"] = net_income_vals
+    result["_revenue_history"] = revenue_vals
+
     # --- Debt / equity (×100 — screener.py divides by 100) ---
     liabilities_vals = _get_annual_values(facts, "Liabilities")
     equity_vals = (
@@ -293,16 +384,24 @@ def get_fundamentals(symbol: str) -> dict:
         result["returnOnEquity"] = net_income_vals[0] / equity_vals[0]
 
     # --- Shares outstanding ---
+    # CommonStockSharesOutstanding (us-gaap, 10-K only) covers some
+    # companies; EntityCommonStockSharesOutstanding (dei taxonomy, updated
+    # every 10-Q) is where many large caps actually report it -- see
+    # _get_annual_values' docstring.
     shares_vals = (
         _get_annual_values(facts, "CommonStockSharesOutstanding", unit="shares")
-        or _get_annual_values(facts, "EntityCommonStockSharesOutstanding", unit="shares")
+        or _get_annual_values(
+            facts, "EntityCommonStockSharesOutstanding", unit="shares",
+            taxonomy="dei", forms=("10-K", "10-K/A", "10-Q"),
+        )
     )
 
-    # --- Latest price from Stooq / IBKR ---
-    price_hist, _price_src = get_price_history(symbol, period_years=2)
-    latest_price: Optional[float] = None
-    if price_hist is not None and not price_hist.empty:
-        latest_price = _safe(price_hist["Close"].iloc[-1])
+    # --- Latest price: caller-supplied (bulk scans), else Stooq / IBKR ---
+    if latest_price is None:
+        price_hist, _price_src = get_price_history(symbol, period_years=2)
+        if price_hist is not None and not price_hist.empty:
+            latest_price = _safe(price_hist["Close"].iloc[-1])
+    result["_latest_price"] = latest_price   # avoids re-fetching price for callers that already need it
 
     # --- Market cap ---
     if shares_vals and latest_price:
