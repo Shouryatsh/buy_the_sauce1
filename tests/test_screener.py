@@ -40,7 +40,11 @@ def _make_ticker(fcf_values: list[float] | None = None) -> MagicMock:
     return ticker
 
 
+# Increasing FCF over 3 years (newest first)
+INCREASING_FCF = [5_000_000_000, 4_000_000_000, 3_000_000_000]
+
 # A minimal passing info dict — satisfies every filter comfortably.
+# Includes _fcf_history (newest→oldest) so the FCF trend filter works.
 GOOD_INFO: dict = {
     "forwardPE": 20.0,
     "profitMargins": 0.15,          # 15%
@@ -49,10 +53,8 @@ GOOD_INFO: dict = {
     "marketCap": 100_000_000_000,   # $100 B → FCF yield = 5%
     "returnOnEquity": 0.20,         # 20%
     "capitalExpenditures": -1_000_000_000,  # $1 B capex → capex/FCF = 20%
+    "_fcf_history": INCREASING_FCF,  # newest → oldest — matches edgar.py convention
 }
-
-# Increasing FCF over 3 years (newest first)
-INCREASING_FCF = [5_000_000_000, 4_000_000_000, 3_000_000_000]
 
 
 # ---------------------------------------------------------------------------
@@ -187,24 +189,24 @@ class TestFcfYieldFilter:
 
 class TestFcfTrendFilter:
     def test_declining_fcf_fails(self):
-        declining = [3_000_000_000, 4_000_000_000, 5_000_000_000]   # oldest → newest reversed
-        ticker = _make_ticker(declining)
-        profile = screen_fundamental("DEC_FCF", info=GOOD_INFO.copy(), _ticker=ticker)
+        declining = [3_000_000_000, 4_000_000_000, 5_000_000_000]   # newest→oldest: 3B < 4B < 5B = declining
+        info = {**GOOD_INFO, "_fcf_history": declining}
+        profile = screen_fundamental("DEC_FCF", info=info)
         assert profile.fcf_increasing is False
         assert profile.passes is False
-        assert any("FCF not increasing" in r for r in profile.fail_reasons)
+        assert any("FCF" in r for r in profile.fail_reasons)
 
     def test_increasing_fcf_passes(self):
-        ticker = _make_ticker(INCREASING_FCF)
-        profile = screen_fundamental("INC_FCF", info=GOOD_INFO.copy(), _ticker=ticker)
+        info = {**GOOD_INFO, "_fcf_history": INCREASING_FCF}
+        profile = screen_fundamental("INC_FCF", info=info)
         assert profile.fcf_increasing is True
 
     def test_missing_cashflow_data_passes_with_benefit_of_doubt(self):
-        ticker = _make_ticker(None)   # empty cashflow DataFrame
-        profile = screen_fundamental("NO_CF", info=GOOD_INFO.copy(), _ticker=ticker)
+        info = {**GOOD_INFO, "_fcf_history": []}
+        profile = screen_fundamental("NO_CF", info=info)
         assert profile.fcf_increasing is None
         # None means data unavailable → benefit of the doubt, not a hard fail
-        assert not any("FCF not increasing" in r for r in profile.fail_reasons)
+        assert not any("FCF" in r and "grew" in r for r in profile.fail_reasons)
 
 
 # ---------------------------------------------------------------------------

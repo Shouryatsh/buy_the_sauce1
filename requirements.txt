@@ -1,15 +1,20 @@
 ib_insync>=0.9.86
 pandas>=2.0.0
 numpy>=1.24.0
-pandas-datareader>=0.10.0   # price history via Stooq (free, no API key)
-requests>=2.31.0             # SEC EDGAR XBRL API calls
+pandas-datareader>=0.10.0      # price history via Stooq (secondary fallback)
+yfinance>=1.2.0                 # price history — primary free fallback after IBKR
+requests>=2.31.0                # SEC EDGAR XBRL API calls
 schedule>=1.2.1
+scikit-learn>=1.4.0             # ML predictor — ml_predictor.py
+lightgbm>=4.0.0                 # Gradient-boosted trees (primary base learner)
+xgboost>=2.0.0                  # XGBoost (second base learner in ensemble)
+scipy>=1.11.0                   # KS statistic in walk-forward CV
+dash>=2.16.0                    # interactive dashboard — dashboard.py
+dash-bootstrap-components>=1.6  # Bootstrap theme for dashboard
+plotly>=5.20.0                  # charts
 pytest>=8.1.1
-# yfinance removed — fundamentals now from SEC EDGAR, prices from Stooq
 
 # --- Options wheel dashboard (wheel_*.py) ---
-scipy>=1.11.0                # Black-Scholes greeks (norm.cdf)
-streamlit>=1.32.0             # dashboard UI
-plotly>=5.20.0                # IV/richness charts
+streamlit>=1.32.0             # dashboard UI (scipy, plotly already listed above)
 # QuantLib intentionally omitted — Phase 3 Merton calibration starts with a
 # pure numpy/scipy fit; add quantlib-python only if that proves insufficient.

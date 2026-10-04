@@ -36,6 +36,16 @@
             "runOptions": {
                 "runOn": "folderOpen"
             }
+        },
+        {
+            "label": "Run Dashboard",
+            "type": "shell",
+            "command": "python3",
+            "args": [
+                "dashboard.py"
+            ],
+            "isBackground": true,
+            "problemMatcher": []
         }
     ]
 }

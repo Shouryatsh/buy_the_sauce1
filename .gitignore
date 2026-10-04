@@ -18,3 +18,10 @@ trading.log
 dist/
 build/
 *.egg-info/
+
+# Local wheel dashboard database (trade history, realized P&L — not for a public repo)
+wheel.db
+
+# Personal trade journal (real $ amounts) and macOS metadata junk — not for a public repo
+results/my_trades.csv
+.DS_Store
