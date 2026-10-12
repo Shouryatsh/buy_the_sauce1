@@ -51,6 +51,7 @@ class WheelSettings(BaseModel):
     profit_take_pct: float = 0.50  # close when this fraction of premium is captured
     tested_buffer_pct: float = 0.02  # "tested" when spot <= strike * (1 + buffer) for puts
     min_iv_rank: float = 20.0
+    require_iv_rank: bool = False  # False: allow entries (flagged) while IV history is still < 30 days
     max_spread_pct: float = 0.10
     min_open_interest: int = 100
     allow_cc_below_cost_basis: bool = False
