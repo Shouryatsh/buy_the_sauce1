@@ -70,6 +70,7 @@ class StraddleSettings(BaseModel):
     max_iv_over_rv: float = 1.0  # long entries need IV/RV at most this
     event_window_days_min: int = 1  # long: earnings must be at least this far ahead
     event_window_days_max: int = 14  # long: and no further than this
+    long_requires_event: bool = True
     min_edge_vs_expected_move: float = 0.0
     profit_target_pct: float = 0.50
     stop_loss_pct: float = 0.50  # of premium paid (long) / of credit (short)
