@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "wheelcli"
@@ -30,11 +30,12 @@ wheel = "wheelcli.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["wheelcli*"]
+include = ["wheelcli*", "optionsdesk*"]
 
 [tool.pytest.ini_options]
-testpaths = ["wheelcli/tests"]
-addopts = "-v --tb=short"
+testpaths = ["tests", "wheelcli/tests"]
+addopts = "--tb=short"
+asyncio_mode = "auto"
 
 [tool.coverage.run]
 source = ["wheelcli"]

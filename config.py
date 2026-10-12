@@ -9,7 +9,7 @@ All tuneable parameters live here so nothing is hard-coded elsewhere.
 # ---------------------------------------------------------------------------
 IBKR_HOST: str = "127.0.0.1"
 # 7497 = TWS paper trading  |  7496 = TWS live  |  4002 = IB Gateway live
-IBKR_PORT: int = 7496
+IBKR_PORT: int = 7497
 IBKR_CLIENT_ID: int = 1
 
 # ---------------------------------------------------------------------------
