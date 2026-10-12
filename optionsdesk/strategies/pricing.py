@@ -7,9 +7,19 @@ from dataclasses import dataclass
 from typing import Literal, Optional, Sequence
 
 from scipy.optimize import brentq
-from scipy.stats import norm
 
 Right = Literal["C", "P"]
+
+_SQRT2 = math.sqrt(2.0)
+_INV_SQRT_2PI = 1.0 / math.sqrt(2.0 * math.pi)
+
+
+def _cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / _SQRT2))
+
+
+def _pdf(x: float) -> float:
+    return _INV_SQRT_2PI * math.exp(-0.5 * x * x)
 
 MIN_IV_HISTORY_DAYS = 30
 
@@ -39,15 +49,15 @@ def bs_greeks(S: float, K: float, T: float, r: float, sigma: float, right: Right
     d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt_t)
     d2 = d1 - sigma * sqrt_t
     disc = math.exp(-r * T)
-    pdf = norm.pdf(d1)
+    pdf = _pdf(d1)
     if right == "C":
-        price = S * norm.cdf(d1) - K * disc * norm.cdf(d2)
-        delta = norm.cdf(d1)
-        theta = -S * pdf * sigma / (2 * sqrt_t) - r * K * disc * norm.cdf(d2)
+        price = S * _cdf(d1) - K * disc * _cdf(d2)
+        delta = _cdf(d1)
+        theta = -S * pdf * sigma / (2 * sqrt_t) - r * K * disc * _cdf(d2)
     else:
-        price = K * disc * norm.cdf(-d2) - S * norm.cdf(-d1)
-        delta = norm.cdf(d1) - 1.0
-        theta = -S * pdf * sigma / (2 * sqrt_t) + r * K * disc * norm.cdf(-d2)
+        price = K * disc * _cdf(-d2) - S * _cdf(-d1)
+        delta = _cdf(d1) - 1.0
+        theta = -S * pdf * sigma / (2 * sqrt_t) + r * K * disc * _cdf(-d2)
     gamma = pdf / (S * sigma * sqrt_t)
     vega = S * pdf * sqrt_t / 100.0
     return Greeks(price, delta, gamma, theta / 365.0, vega)

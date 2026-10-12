@@ -95,6 +95,12 @@ class BacktestSettings(BaseModel):
     slippage_pct_of_spread: float = 0.50  # fill this far through the bid/ask spread
     risk_free_rate: float = 0.045
     initial_capital: float = 100_000.0
+    # Option prices are modelled (no historical chains): IV proxy = trailing realized vol x premium.
+    iv_window: int = 20
+    rv_window: int = 60
+    iv_premium: float = 1.10
+    event_iv_uplift: float = 1.20  # IV multiplier for expiries that span a known event
+    contracts: int = 1
 
 
 class Settings(BaseSettings):
