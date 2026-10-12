@@ -35,6 +35,8 @@ class IBKRSettings(BaseModel):
     # 1=live, 3=delayed. Delayed is requested when no OPRA subscription exists.
     market_data_type: Literal[1, 2, 3, 4] = 3
     max_requests_per_second: float = 20.0
+    batch_size: int = 40  # simultaneous option market-data lines per batch
+    mktdata_wait_seconds: float = 3.0  # let model greeks arrive before reading
     reconnect_backoff_seconds: float = 5.0
     reconnect_max_backoff_seconds: float = 120.0
     quote_cache_ttl_seconds: float = 30.0
@@ -112,6 +114,11 @@ class Settings(BaseSettings):
 
     mode: Mode = Mode.PAPER
     allow_live: bool = False  # must be true AND mode=live for live trading to be possible
+    # "simulated" never touches IBKR; "ibkr" needs TWS/Gateway with API enabled.
+    data_source: Literal["ibkr", "simulated"] = "ibkr"
+    execution_backend: Literal["ibkr", "simulated"] = "simulated"
+    heartbeat_interval_seconds: float = 15.0
+    strategies: list[Literal["wheel", "straddle"]] = Field(default_factory=lambda: ["wheel", "straddle"])
     db_path: str = "optionsdesk.db"
     tickers: list[str] = Field(default_factory=lambda: ["AAPL", "MSFT", "KO"])
     earnings_file: str = "earnings_calendar.csv"

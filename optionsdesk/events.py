@@ -98,6 +98,8 @@ class IVMetrics(Event):
     expected_move_abs: Optional[float] = None
     expected_move_pct: Optional[float] = None
     expected_move_expiry: Optional[date] = None
+    realized_vol: Optional[float] = None  # annualized, from stored daily closes
+    rv_days: int = 0
 
 
 class Leg(BaseModel):
@@ -167,6 +169,7 @@ class OrderUpdate(Event):
     detail: str = ""
     paper: bool = True
     fill_price: Optional[float] = None
+    leg_fills: list[float] = Field(default_factory=list)  # per-share fill for each OrderIntent leg, same order
 
 
 class AgentStatus(str, Enum):

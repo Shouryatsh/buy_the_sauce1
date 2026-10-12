@@ -14,6 +14,10 @@ CREATE TABLE IF NOT EXISTS iv_history (
     symbol TEXT NOT NULL, day TEXT NOT NULL, iv REAL NOT NULL,
     PRIMARY KEY (symbol, day)
 );
+CREATE TABLE IF NOT EXISTS price_history (
+    symbol TEXT NOT NULL, day TEXT NOT NULL, close REAL NOT NULL,
+    PRIMARY KEY (symbol, day)
+);
 CREATE TABLE IF NOT EXISTS signals (
     id TEXT PRIMARY KEY, correlation_id TEXT NOT NULL, ts TEXT NOT NULL,
     strategy TEXT NOT NULL, symbol TEXT NOT NULL, action TEXT NOT NULL,
@@ -119,6 +123,25 @@ class Database:
         params.append(limit)
         rows = self._all(sql, tuple(params))
         return [(r["day"], r["iv"]) for r in reversed(rows)]
+
+    # ---- price history ---------------------------------------------------
+    def upsert_close(self, symbol: str, day: date, close: float) -> None:
+        self._exec(
+            "INSERT INTO price_history(symbol,day,close) VALUES(?,?,?) "
+            "ON CONFLICT(symbol,day) DO UPDATE SET close=excluded.close",
+            (symbol, day.isoformat(), close),
+        )
+
+    def closes(self, symbol: str, until: Optional[date] = None, limit: int = 260) -> list[tuple[str, float]]:
+        sql = "SELECT day, close FROM price_history WHERE symbol=?"
+        params: list[Any] = [symbol]
+        if until is not None:
+            sql += " AND day<=?"
+            params.append(until.isoformat())
+        sql += " ORDER BY day DESC LIMIT ?"
+        params.append(limit)
+        rows = self._all(sql, tuple(params))
+        return [(r["day"], r["close"]) for r in reversed(rows)]
 
     # ---- signals / risk / orders ----------------------------------------
     def save_signal(self, e: Any) -> None:
