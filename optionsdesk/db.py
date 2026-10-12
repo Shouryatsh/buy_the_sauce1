@@ -176,6 +176,14 @@ class Database:
     def get_order(self, order_id: str) -> Optional[dict]:
         return self._one("SELECT * FROM orders WHERE order_id=?", (order_id,))
 
+    def cancel_stale_confirmations(self) -> None:
+        self._exec("UPDATE orders SET status='cancelled', detail='stale confirmation (restart)', updated_at=? "
+                   "WHERE status='pending_confirmation'", (_now(),))
+
+    def list_orders(self, limit: int = 200) -> list[dict]:
+        return self._all("SELECT order_id,correlation_id,signal_id,created_at,updated_at,symbol,strategy,status,paper,"
+                         "reason,detail,fill_price FROM orders ORDER BY created_at DESC LIMIT ?", (limit,))
+
     def journal(self, limit: int = 200) -> list[dict]:
         """Signals joined with their risk decision and order, newest first."""
         return self._all(

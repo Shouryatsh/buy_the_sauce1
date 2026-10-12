@@ -117,6 +117,8 @@ class Settings(BaseSettings):
     # "simulated" never touches IBKR; "ibkr" needs TWS/Gateway with API enabled.
     data_source: Literal["ibkr", "simulated"] = "ibkr"
     execution_backend: Literal["ibkr", "simulated"] = "simulated"
+    auto_execute_paper: bool = True  # False: paper orders also wait for manual confirmation
+    order_fill_timeout_seconds: float = 60.0
     heartbeat_interval_seconds: float = 15.0
     strategies: list[Literal["wheel", "straddle"]] = Field(default_factory=lambda: ["wheel", "straddle"])
     db_path: str = "optionsdesk.db"
