@@ -176,6 +176,10 @@ class Database:
     def get_order(self, order_id: str) -> Optional[dict]:
         return self._one("SELECT * FROM orders WHERE order_id=?", (order_id,))
 
+    def latest_utilization(self) -> Optional[dict]:
+        row = self._one("SELECT utilization FROM risk_decisions ORDER BY ts DESC LIMIT 1")
+        return json.loads(row["utilization"]) if row and row["utilization"] else None
+
     def cancel_stale_confirmations(self) -> None:
         self._exec("UPDATE orders SET status='cancelled', detail='stale confirmation (restart)', updated_at=? "
                    "WHERE status='pending_confirmation'", (_now(),))
@@ -207,6 +211,13 @@ class Database:
 
     def open_positions(self) -> list[dict]:
         rows = self._all("SELECT * FROM positions WHERE status='open'")
+        for r in rows:
+            r["legs"] = json.loads(r["legs"])
+            r["meta"] = json.loads(r["meta"] or "{}")
+        return rows
+
+    def closed_positions(self, limit: int = 200) -> list[dict]:
+        rows = self._all("SELECT * FROM positions WHERE status='closed' ORDER BY closed_at DESC LIMIT ?", (limit,))
         for r in rows:
             r["legs"] = json.loads(r["legs"])
             r["meta"] = json.loads(r["meta"] or "{}")

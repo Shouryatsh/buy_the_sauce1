@@ -15,7 +15,7 @@ from ..strategies.straddle import (
     MULT, PayoffLeg, breakevens, build_legs, evaluate_entry, exit_decision, max_profit_loss, net_greeks,
     net_value_per_share,
 )
-from .base import BaseAgent, Context
+from .base import BaseAgent, Context, IVGate
 from .wheel import find_quote
 
 
@@ -29,6 +29,7 @@ class StraddleAgent(BaseAgent):
         self.events = load_earnings(self.settings.earnings_file)
         self.pending: dict[str, dict[str, Any]] = {}
         self.inflight: dict[str, str] = {}
+        self.gate = IVGate(self, self.on_chain, self.settings.iv_wait_seconds)
 
     async def run(self) -> None:
         sub = self.bus.subscribe(ChainSnapshot, IVMetrics, OrderUpdate, RiskDecision)
@@ -40,14 +41,16 @@ class StraddleAgent(BaseAgent):
                     continue
                 if isinstance(ev, IVMetrics):
                     self.iv[ev.symbol] = ev
+                    self.gate.on_iv(ev)
                 elif isinstance(ev, ChainSnapshot):
-                    await self.handle_safely(self.on_chain, ev)
+                    self.gate.on_chain(ev)
                 elif isinstance(ev, OrderUpdate):
                     await self.handle_safely(self.on_order, ev)
                 elif isinstance(ev, RiskDecision):
                     await self.handle_safely(self.on_risk, ev)
         finally:
             sub.close()
+            self.gate.cancel()
 
     # ---- state ------------------------------------------------------------
     def open_position(self, symbol: str) -> Optional[dict]:

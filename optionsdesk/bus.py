@@ -48,10 +48,11 @@ class Subscription:
 
 
 class EventBus:
-    def __init__(self, history: int = 500) -> None:
+    def __init__(self, history: int = 500, history_exclude: tuple[type[Event], ...] = ()) -> None:
         self._subs: dict[type[Event], list[Subscription]] = defaultdict(list)
         self._history: list[Event] = []
         self._history_max = history
+        self._history_exclude = history_exclude
 
     def subscribe(self, *types: type[Event], maxsize: int = 1000) -> Subscription:
         if not types:
@@ -67,7 +68,8 @@ class EventBus:
                 self._subs[t].remove(sub)
 
     def publish(self, event: Event) -> None:
-        self._history.append(event)
+        if not isinstance(event, self._history_exclude):
+            self._history.append(event)
         if len(self._history) > self._history_max:
             del self._history[: len(self._history) - self._history_max]
         delivered: set[int] = set()

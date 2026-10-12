@@ -17,7 +17,7 @@ from ..strategies.wheel import (
     Candidate, InvalidTransition, ManagementAction, WheelPosition, WheelState, entry_ok, management_actions,
     select_candidate,
 )
-from .base import BaseAgent, Context
+from .base import BaseAgent, Context, IVGate
 
 MULT = 100
 
@@ -35,6 +35,7 @@ class WheelAgent(BaseAgent):
         self.iv: dict[str, IVMetrics] = {}
         self.pending: dict[str, dict[str, Any]] = {}  # signal_id -> {symbol, kind, ...}
         self.inflight: dict[str, str] = {}  # symbol -> signal_id
+        self.gate = IVGate(self, self.on_chain, self.settings.iv_wait_seconds)
         saved = {r["symbol"]: r for r in self.db.wheel_states()}
         self.positions: dict[str, WheelPosition] = {}
         for sym in self.settings.tickers:
@@ -54,14 +55,16 @@ class WheelAgent(BaseAgent):
                     continue
                 if isinstance(ev, IVMetrics):
                     self.iv[ev.symbol] = ev
+                    self.gate.on_iv(ev)
                 elif isinstance(ev, ChainSnapshot):
-                    await self.handle_safely(self.on_chain, ev)
+                    self.gate.on_chain(ev)
                 elif isinstance(ev, OrderUpdate):
                     await self.handle_safely(self.on_order, ev)
                 elif isinstance(ev, RiskDecision):
                     await self.handle_safely(self.on_risk, ev)
         finally:
             sub.close()
+            self.gate.cancel()
 
     def _persist(self, pos: WheelPosition) -> None:
         self.db.save_wheel_state(pos.symbol, pos.state.value, pos.shares, pos.cost_basis, pos.lifetime_premium,

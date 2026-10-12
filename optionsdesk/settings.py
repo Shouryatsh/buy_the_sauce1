@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from enum import Enum
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import (
@@ -120,7 +120,14 @@ class Settings(BaseSettings):
     auto_execute_paper: bool = True  # False: paper orders also wait for manual confirmation
     order_fill_timeout_seconds: float = 60.0
     heartbeat_interval_seconds: float = 15.0
+    iv_wait_seconds: float = 2.0  # strategy agents wait this long for a chain's IV metrics before deciding without them
     strategies: list[Literal["wheel", "straddle"]] = Field(default_factory=lambda: ["wheel", "straddle"])
+    # Agents to run in this process (market_data, iv, wheel, straddle, risk, execution, backtest, narrative).
+    agents: list[str] = Field(default_factory=lambda: [
+        "market_data", "iv", "wheel", "straddle", "risk", "execution", "backtest", "narrative"])
+    starting_capital: float = 100_000.0  # base for portfolio value = base + realized + unrealized
+    api_token: Optional[str] = None  # if set, mutating API calls need header X-API-Token
+    narrative_interval_seconds: float = 3600.0
     db_path: str = "optionsdesk.db"
     tickers: list[str] = Field(default_factory=lambda: ["AAPL", "MSFT", "KO"])
     earnings_file: str = "earnings_calendar.csv"

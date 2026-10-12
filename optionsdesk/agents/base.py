@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from ..bus import EventBus, Subscription
 from ..db import Database
-from ..events import AgentStatus, Event, Heartbeat
+from ..events import AgentStatus, ChainSnapshot, Event, Heartbeat, IVMetrics
 from ..logs import correlation, get_logger
 from ..settings import Settings
 
@@ -20,6 +20,57 @@ class Context:
     bus: EventBus
     db: Database
     today: Callable[[], date] = date.today
+
+
+class IVGate:
+    """Hands a chain to `handler` once the IV metrics derived from it arrive (same correlation id),
+    or after `timeout` seconds if they never do, so decisions use fresh IV rank when available."""
+
+    def __init__(self, agent: "BaseAgent", handler: Callable[[ChainSnapshot], Any], timeout: float) -> None:
+        self.agent, self.handler, self.timeout = agent, handler, timeout
+        self._pending: dict[str, ChainSnapshot] = {}
+        self._timers: dict[str, asyncio.TimerHandle] = {}
+
+    def on_chain(self, snap: ChainSnapshot) -> None:
+        old = self._pending.pop(snap.symbol, None)
+        timer = self._timers.pop(snap.symbol, None)
+        if timer:
+            timer.cancel()
+        if old is not None:  # previous chain never got its IV: don't drop it silently
+            self._run(old)
+        self._pending[snap.symbol] = snap
+        self._timers[snap.symbol] = asyncio.get_running_loop().call_later(self.timeout, self._expire, snap.symbol, snap.id)
+
+    def on_iv(self, iv: IVMetrics) -> None:
+        snap = self._pending.get(iv.symbol)
+        if snap is not None and snap.correlation_id == iv.correlation_id:
+            self._release(iv.symbol)
+
+    def _expire(self, symbol: str, snap_id: str) -> None:
+        snap = self._pending.get(symbol)
+        if snap is not None and snap.id == snap_id:
+            self._release(symbol)
+
+    def _release(self, symbol: str) -> None:
+        snap = self._pending.pop(symbol)
+        timer = self._timers.pop(symbol, None)
+        if timer:
+            timer.cancel()
+        self._run(snap)
+
+    def _run(self, snap: ChainSnapshot) -> None:
+        with correlation(snap.correlation_id):
+            try:
+                self.handler(snap)
+                self.agent.beat(AgentStatus.RUNNING, ran=True)
+            except Exception as exc:  # noqa: BLE001 - isolation boundary
+                self.agent.degrade(exc, f"handling {type(snap).__name__}")
+
+    def cancel(self) -> None:
+        for t in self._timers.values():
+            t.cancel()
+        self._timers.clear()
+        self._pending.clear()
 
 
 class BaseAgent:

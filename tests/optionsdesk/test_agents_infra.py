@@ -237,3 +237,50 @@ async def test_iv_agent_stores_history_and_publishes_with_same_correlation_id():
     assert m.correlation_id == s.correlation_id and m.symbol == "AAA"
     assert m.iv_rank is not None and 0 <= m.iv_rank <= 100 and m.history_days == 41
     assert ctx.db.iv_history("AAA", until=TODAY)[-1][1] == pytest.approx(0.30, abs=1e-6)
+
+
+# ---- IV gate ----------------------------------------------------------------
+
+async def test_iv_gate_waits_for_matching_iv_then_fires_once():
+    from optionsdesk.agents.base import IVGate
+    ctx = make_ctx()
+    seen = []
+    gate = IVGate(Steady(ctx), seen.append, timeout=5.0)
+    s = snap()
+    gate.on_chain(s)
+    assert seen == []
+    gate.on_iv(IVMetrics(symbol="AAA", iv_current=0.3, correlation_id="other"))  # unrelated IV: keep waiting
+    assert seen == []
+    gate.on_iv(s.derive(IVMetrics, symbol="AAA", iv_current=0.3))
+    assert seen == [s]
+    gate.on_iv(s.derive(IVMetrics, symbol="AAA", iv_current=0.3))
+    assert seen == [s]  # released exactly once
+
+
+async def test_iv_gate_falls_back_after_timeout_and_never_drops_chains():
+    from optionsdesk.agents.base import IVGate
+    ctx = make_ctx()
+    seen = []
+    gate = IVGate(Steady(ctx), seen.append, timeout=0.05)
+    a, b = snap(), snap()
+    gate.on_chain(a)
+    await asyncio.sleep(0.12)
+    assert seen == [a]  # no IV ever arrived: decided without it
+    gate.on_chain(a)
+    gate.on_chain(b)  # replaces a pending chain: the older one is processed, not lost
+    assert seen == [a, a]
+    gate.cancel()
+
+
+async def test_iv_gate_handler_errors_degrade_agent_not_crash():
+    from optionsdesk.agents.base import IVGate
+    ctx = make_ctx()
+    agent = Steady(ctx)
+
+    def boom(_):
+        raise RuntimeError("bad chain")
+
+    gate = IVGate(agent, boom, timeout=0.01)
+    gate.on_chain(snap())
+    await asyncio.sleep(0.05)
+    assert agent.status is AgentStatus.DEGRADED and "bad chain" in agent.last_error
