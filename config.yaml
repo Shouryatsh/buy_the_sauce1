@@ -1,0 +1,39 @@
+# optionsdesk configuration. Environment overrides: OPTIONSDESK_<KEY>, nested with "__".
+mode: paper          # paper (port 7497) | live (needs allow_live: true and manual confirmation)
+allow_live: false
+db_path: optionsdesk.db
+tickers: [AAPL, MSFT, KO, JPM, V]
+earnings_file: earnings_calendar.csv
+poll_interval_seconds: 60
+log_level: INFO
+
+ibkr:
+  host: 127.0.0.1
+  paper_port: 7497
+  live_port: 7496
+  client_id: 21
+  market_data_type: 3   # 1 live (OPRA subscription), 3 delayed
+
+wheel:
+  put_delta_min: 0.25
+  put_delta_max: 0.30
+  call_delta_min: 0.25
+  call_delta_max: 0.30
+  dte_min: 30
+  dte_max: 45
+  roll_dte: 21
+  profit_take_pct: 0.50
+  allow_cc_below_cost_basis: false
+
+straddle:
+  mode: long            # long | short
+  use_wings: false
+  long_max_iv_rank: 30
+  short_min_iv_rank: 60
+
+risk:
+  max_capital_at_risk: 100000
+  max_ticker_concentration: 0.15
+  max_net_delta: 500
+  max_net_vega: 2000
+  max_scenario_loss_pct: 0.20

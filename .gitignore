@@ -25,3 +25,7 @@ wheel.db
 # Personal trade journal (real $ amounts) and macOS metadata junk — not for a public repo
 results/my_trades.csv
 .DS_Store
+
+# optionsdesk runtime DB
+optionsdesk.db
+optionsdesk.db-*
