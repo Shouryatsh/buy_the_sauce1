@@ -41,6 +41,22 @@ def serve(
     uvicorn.run("optionsdesk.api.app:app_factory", factory=True, host=host, port=port, log_level="warning")
 
 
+@app.command()
+def dashboard(
+    port: int = typer.Option(8502, help="Streamlit port (the legacy wheel dashboard keeps 8501)."),
+    api_url: str = typer.Option("http://127.0.0.1:8000", help="optionsdesk API base URL"),
+) -> None:
+    """Launch the Streamlit dashboard (dark theme). The API must already be running."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    env = {**os.environ, "OPTIONSDESK_API_URL": api_url}
+    script = str(Path(__file__).parent / "ui" / "app.py")
+    cmd = [sys.executable, "-m", "streamlit", "run", script, "--server.port", str(port), "--server.headless", "true",
+           "--theme.base", "dark", "--theme.primaryColor", "#4aa3ff", "--browser.gatherUsageStats", "false"]
+    raise typer.Exit(subprocess.call(cmd, env=env))
+
+
 @app.command("kill-switch")
 def kill_switch(state: str = typer.Argument(..., help="on | off"), reason: str = typer.Option("cli")) -> None:
     """Engage/release the global kill switch (works while the server runs: it is checked before every order)."""

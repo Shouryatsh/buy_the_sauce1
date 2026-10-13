@@ -17,7 +17,7 @@ from ..strategies.wheel import (
     Candidate, InvalidTransition, ManagementAction, WheelPosition, WheelState, entry_ok, management_actions,
     select_candidate,
 )
-from .base import BaseAgent, Context, IVGate
+from .base import BaseAgent, Context, IVGate, SignalCooldown
 
 MULT = 100
 
@@ -36,6 +36,7 @@ class WheelAgent(BaseAgent):
         self.pending: dict[str, dict[str, Any]] = {}  # signal_id -> {symbol, kind, ...}
         self.inflight: dict[str, str] = {}  # symbol -> signal_id
         self.gate = IVGate(self, self.on_chain, self.settings.iv_wait_seconds)
+        self.cooldown = SignalCooldown(self.settings.signal_cooldown_seconds)
         saved = {r["symbol"]: r for r in self.db.wheel_states()}
         self.positions: dict[str, WheelPosition] = {}
         for sym in self.settings.tickers:
@@ -80,6 +81,8 @@ class WheelAgent(BaseAgent):
         if snap.symbol in self.inflight:
             return None
         sig = self.decide(pos, snap, today)
+        if sig is not None and self.cooldown.active(SignalCooldown.key(sig)):
+            return None
         if sig is not None:
             self.inflight[snap.symbol] = sig.id
             self._remember(sig)
@@ -186,7 +189,14 @@ class WheelAgent(BaseAgent):
     # ---- fills ------------------------------------------------------------
     def on_risk(self, d: RiskDecision) -> None:
         if d.verdict is Verdict.BLOCK:
+            self._suppress(d.signal_id)
             self._clear(d.signal_id)
+            self.pending.pop(d.signal_id, None)
+
+    def _suppress(self, signal_id: str) -> None:
+        info = self.pending.get(signal_id)
+        if info is not None:
+            self.cooldown.suppress(info["key"])
 
     def _clear(self, signal_id: str) -> None:
         for sym, sid in list(self.inflight.items()):
@@ -194,12 +204,14 @@ class WheelAgent(BaseAgent):
                 del self.inflight[sym]
 
     def _remember(self, sig: Signal) -> None:
-        self.pending[sig.id] = {"symbol": sig.symbol, "kind": sig.meta.get("kind"), "legs": sig.legs}
+        self.pending[sig.id] = {"symbol": sig.symbol, "kind": sig.meta.get("kind"), "legs": sig.legs,
+                                "key": SignalCooldown.key(sig)}
 
     def on_order(self, u: OrderUpdate) -> None:
         if u.signal_id not in self.inflight.values():
             return
         if u.status in (OrderStatus.REJECTED, OrderStatus.CANCELLED):
+            self._suppress(u.signal_id)
             self._clear(u.signal_id)
             self.pending.pop(u.signal_id, None)
             return

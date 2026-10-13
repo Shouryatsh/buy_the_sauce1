@@ -15,7 +15,7 @@ from ..strategies.straddle import (
     MULT, PayoffLeg, breakevens, build_legs, evaluate_entry, exit_decision, max_profit_loss, net_greeks,
     net_value_per_share,
 )
-from .base import BaseAgent, Context, IVGate
+from .base import BaseAgent, Context, IVGate, SignalCooldown
 from .wheel import find_quote
 
 
@@ -30,6 +30,7 @@ class StraddleAgent(BaseAgent):
         self.pending: dict[str, dict[str, Any]] = {}
         self.inflight: dict[str, str] = {}
         self.gate = IVGate(self, self.on_chain, self.settings.iv_wait_seconds)
+        self.cooldown = SignalCooldown(self.settings.signal_cooldown_seconds)
 
     async def run(self) -> None:
         sub = self.bus.subscribe(ChainSnapshot, IVMetrics, OrderUpdate, RiskDecision)
@@ -67,10 +68,13 @@ class StraddleAgent(BaseAgent):
         today = self.ctx.today()
         pos = self.open_position(snap.symbol)
         sig = self._manage(pos, snap, today) if pos else self._enter(snap, today)
+        if sig is not None and self.cooldown.active(SignalCooldown.key(sig)):
+            return None
         if sig is not None:
             self.inflight[snap.symbol] = sig.id
             self.pending[sig.id] = {"symbol": snap.symbol, "kind": sig.meta["kind"], "legs": sig.legs,
-                                    "position_id": pos["id"] if pos else sig.id, "mode": sig.meta.get("mode")}
+                                    "position_id": pos["id"] if pos else sig.id, "mode": sig.meta.get("mode"),
+                                    "key": SignalCooldown.key(sig)}
             self.bus.publish(sig)
         return sig
 
@@ -137,6 +141,9 @@ class StraddleAgent(BaseAgent):
     # ---- fills ------------------------------------------------------------
     def on_risk(self, d: RiskDecision) -> None:
         if d.verdict is Verdict.BLOCK:
+            info = self.pending.pop(d.signal_id, None)
+            if info is not None:
+                self.cooldown.suppress(info["key"])
             self._clear(d.signal_id)
 
     def _clear(self, signal_id: str) -> None:
@@ -148,7 +155,9 @@ class StraddleAgent(BaseAgent):
         if u.signal_id not in self.inflight.values():
             return
         if u.status in (OrderStatus.REJECTED, OrderStatus.CANCELLED):
-            self.pending.pop(u.signal_id, None)
+            info = self.pending.pop(u.signal_id, None)
+            if info is not None:
+                self.cooldown.suppress(info["key"])
             self._clear(u.signal_id)
             return
         if u.status is not OrderStatus.FILLED:

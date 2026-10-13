@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Callable, Optional
@@ -20,6 +21,34 @@ class Context:
     bus: EventBus
     db: Database
     today: Callable[[], date] = date.today
+
+
+class SignalCooldown:
+    """Suppresses re-emitting an identical signal for a while after it was blocked or rejected."""
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+        self._until: dict[tuple, float] = {}
+
+    @staticmethod
+    def key(sig: Any) -> tuple:
+        return (sig.strategy, sig.symbol, sig.action.value,
+                tuple((l.right, l.strike, l.expiry, l.quantity) for l in sig.legs))
+
+    def suppress(self, key: tuple) -> None:
+        self._until[key] = time.monotonic() + self.seconds
+
+    def active(self, key: tuple) -> bool:
+        until = self._until.get(key)
+        if until is None:
+            return False
+        if time.monotonic() >= until:
+            del self._until[key]
+            return False
+        return True
+
+    def reset(self) -> None:
+        self._until.clear()
 
 
 class IVGate:

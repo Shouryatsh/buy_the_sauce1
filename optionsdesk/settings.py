@@ -121,6 +121,7 @@ class Settings(BaseSettings):
     order_fill_timeout_seconds: float = 60.0
     heartbeat_interval_seconds: float = 15.0
     iv_wait_seconds: float = 2.0  # strategy agents wait this long for a chain's IV metrics before deciding without them
+    signal_cooldown_seconds: float = 1800.0  # don't re-emit an identical signal that risk blocked or the broker rejected
     strategies: list[Literal["wheel", "straddle"]] = Field(default_factory=lambda: ["wheel", "straddle"])
     # Agents to run in this process (market_data, iv, wheel, straddle, risk, execution, backtest, narrative).
     agents: list[str] = Field(default_factory=lambda: [

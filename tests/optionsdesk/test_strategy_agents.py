@@ -78,17 +78,35 @@ def test_wheel_fill_moves_state_and_persists():
     assert WheelAgent(ctx).positions["AAA"].state is WheelState.CSP_OPEN
 
 
-def test_wheel_rejected_or_blocked_clears_inflight():
+def test_wheel_rejected_or_blocked_clears_inflight_and_suppresses_identical_resignal():
     ctx = ctx_for()
     agent = WheelAgent(ctx)
     agent.iv["AAA"] = ivm()
     sig = agent.on_chain(snap())
     agent.on_order(fill(sig, OrderStatus.REJECTED))
     assert "AAA" not in agent.inflight and agent.positions["AAA"].state is WheelState.SEARCHING
+    assert agent.on_chain(snap()) is None  # same contract again: cooling down, no journal spam
+    agent.cooldown.reset()
     sig2 = agent.on_chain(snap())
     assert sig2 is not None
     agent.on_risk(sig2.derive(RiskDecision, signal_id=sig2.id, verdict=Verdict.BLOCK))
-    assert "AAA" not in agent.inflight
+    assert "AAA" not in agent.inflight and sig2.id not in agent.pending
+    assert agent.on_chain(snap()) is None  # blocked signals are not re-emitted every poll
+
+
+def test_cooldown_expires_and_does_not_hide_different_contracts(monkeypatch):
+    from optionsdesk.agents.base import SignalCooldown
+    ctx = ctx_for(signal_cooldown_seconds=1000)
+    agent = WheelAgent(ctx)
+    agent.iv["AAA"] = ivm()
+    sig = agent.on_chain(snap())
+    agent.on_risk(sig.derive(RiskDecision, signal_id=sig.id, verdict=Verdict.BLOCK))
+    assert agent.on_chain(snap()) is None
+    assert agent.on_chain(snap(spot=97.0)) is not None  # price moved -> different strike -> new signal
+    key = SignalCooldown.key(sig)
+    agent.cooldown._until[key] -= 2000  # time passes
+    agent.inflight.clear()
+    assert not agent.cooldown.active(key)
 
 
 def _open_csp(agent, strike=95.0, dte=35, premium=2.0):
