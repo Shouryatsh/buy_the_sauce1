@@ -23,7 +23,7 @@ def _body() -> None:
         "ann. return (done)": None if r["annualized_return"] is None else r["annualized_return"] * 100,
         "ann. return (current)": None if r["cycle_annualized_return"] is None else r["cycle_annualized_return"] * 100,
     } for r in rows])
-    st.dataframe(df, hide_index=True, use_container_width=True, column_config={
+    st.dataframe(df, hide_index=True, width="stretch", column_config={
         "cost basis": st.column_config.NumberColumn(format="$%.2f"),
         "premium collected": st.column_config.NumberColumn(format="$%.0f"),
         "realized P&L": st.column_config.NumberColumn(format="$%.0f"),
@@ -55,12 +55,12 @@ def _body() -> None:
     if held:
         fig = go.Figure(go.Bar(x=[r["symbol"] for r in held], y=[r["premium_collected"] for r in held],
                                marker_color=[theme.pnl_color(r["premium_collected"]) for r in held]))
-        st.plotly_chart(charts._layout(fig, "Premium collected (lifetime, $)", 260), use_container_width=True)
+        st.plotly_chart(charts._layout(fig, "Premium collected (lifetime, $)", 260), width="stretch")
 
     for r in rows:
         if r["history"]:
             with st.expander(f"{r['symbol']}: completed cycles"):
-                st.dataframe(pd.DataFrame(r["history"]), hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(r["history"]), hide_index=True, width="stretch")
 
 
 def render() -> None:

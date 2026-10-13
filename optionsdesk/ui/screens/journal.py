@@ -30,7 +30,7 @@ def _body() -> None:
         df = df[df["order_status"].isin(stat)]
 
     st.dataframe(df[["ts", "strategy", "symbol", "action", "verdict", "order_status", "paper", "fill_price", "reason", "correlation_id"]],
-                 hide_index=True, use_container_width=True, column_config={
+                 hide_index=True, width="stretch", column_config={
                      "ts": st.column_config.DatetimeColumn(format="MMM D, HH:mm:ss"),
                      "paper": st.column_config.CheckboxColumn("paper")})
 

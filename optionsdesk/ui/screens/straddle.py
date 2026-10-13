@@ -24,7 +24,7 @@ def _body() -> None:
     g, m = st.columns([1, 2])
     with g:
         st.plotly_chart(charts.iv_gauge(row.get("iv_rank"), th["long_max_iv_rank"], th["short_min_iv_rank"],
-                                        f"{symbol} IV rank"), use_container_width=True)
+                                        f"{symbol} IV rank"), width="stretch")
         if row.get("iv_rank") is None:
             st.warning("IV rank needs 30+ days of IV history.")
     with m:
@@ -33,7 +33,7 @@ def _body() -> None:
         a[1].metric("Realized vol", "-" if row.get("realized_vol") is None else f"{row['realized_vol']:.1%}")
         a[2].metric("IV percentile", "-" if row.get("iv_percentile") is None else f"{row['iv_percentile']:.0f}")
         a[3].metric("Days to event", "-" if row.get("days_to_event") is None else row["days_to_event"])
-        st.plotly_chart(charts.move_compare(rows), use_container_width=True)
+        st.plotly_chart(charts.move_compare(rows), width="stretch")
 
     cand = row.get("candidate")
     if not cand:
@@ -47,7 +47,7 @@ def _body() -> None:
             st.caption(f"flag: {f}")
         st.plotly_chart(charts.payoff_fig(cand["payoff"]["spot"], cand["payoff"]["pnl"], cand["breakevens"], cand["spot"],
                                           f"{symbol} {cand['mode']} straddle {cand['strike']:g} exp {cand['expiry']}"),
-                        use_container_width=True)
+                        width="stretch")
         k = st.columns(6)
         be = cand["breakevens"]
         k[0].metric("Breakevens", " / ".join(f"{b:.2f}" for b in be) if be else "-")
@@ -63,7 +63,7 @@ def _body() -> None:
         for p in data["open_positions"]:
             with st.expander(f"{p['symbol']} {p['mode']} - opened {p['opened_at']}", expanded=False):
                 st.plotly_chart(charts.payoff_fig(p["payoff"]["spot"], p["payoff"]["pnl"], p["breakevens"], None),
-                                use_container_width=True)
+                                width="stretch")
                 st.caption(f"max loss {p['max_loss']}, max profit {p['max_profit']}, greeks {p['greeks']}")
 
 

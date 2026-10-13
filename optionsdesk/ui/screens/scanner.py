@@ -33,7 +33,7 @@ def _body() -> None:
         df[col] = df[col] * 100.0  # shown with a % sign
     st.caption(f"{len(df)} candidates. Click a column header to sort. Wheel score = annualized return on strike; "
                "straddle score = implied move as % of spot. Quality 'estimated' = modelled, not broker data.")
-    st.dataframe(df, hide_index=True, use_container_width=True, column_config={
+    st.dataframe(df, hide_index=True, width="stretch", column_config={
         "delta": st.column_config.NumberColumn(format="%.2f"), "mid": st.column_config.NumberColumn(format="%.2f"),
         "spread_pct": st.column_config.NumberColumn("spread", format="%.1f%%", help="of mid"),
         "iv": st.column_config.NumberColumn(format="%.1f%%"),

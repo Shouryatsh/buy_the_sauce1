@@ -401,3 +401,9 @@ This software is provided for educational and research purposes only.
 Trading involves substantial risk of loss. Past performance does not
 guarantee future results. Always paper-trade and review signals before
 connecting to a live account.
+---
+
+## optionsdesk (wheel + straddle multi-agent system)
+
+See [optionsdesk/README.md](optionsdesk/README.md) for setup, config, agents, paper trading and the dashboard (port 8502).
+

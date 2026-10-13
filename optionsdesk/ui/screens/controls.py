@@ -52,7 +52,7 @@ def _body() -> None:
     st.subheader("Order log")
     if orders:
         df = pd.DataFrame(orders)[["created_at", "symbol", "strategy", "status", "paper", "fill_price", "detail", "reason", "correlation_id"]]
-        st.dataframe(df, hide_index=True, use_container_width=True)
+        st.dataframe(df, hide_index=True, width="stretch")
     else:
         st.caption("No orders yet.")
 

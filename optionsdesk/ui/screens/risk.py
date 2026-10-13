@@ -25,7 +25,7 @@ def _body() -> None:
         st.success("All limits within bounds.")
 
     a, b = st.columns([3, 2])
-    a.plotly_chart(charts.utilization_bars(util, lim["warn_utilization"]), use_container_width=True)
+    a.plotly_chart(charts.utilization_bars(util, lim["warn_utilization"]), width="stretch")
     with b:
         k = st.columns(2)
         k[0].metric("Capital at risk", f"${r['total_capital_at_risk']:,.0f}")
@@ -40,11 +40,11 @@ def _body() -> None:
     if not r["heatmap"]:
         st.info("No open positions: exposure and scenario views appear once something is open.")
         return
-    st.plotly_chart(charts.exposure_heatmap(r["heatmap"]), use_container_width=True)
-    st.plotly_chart(charts.scenario_heatmap(r["scenario"]), use_container_width=True)
+    st.plotly_chart(charts.exposure_heatmap(r["heatmap"]), width="stretch")
+    st.plotly_chart(charts.scenario_heatmap(r["scenario"]), width="stretch")
     conc = pd.DataFrame([{"ticker": t, "capital at risk": c, "concentration": r["concentration"][t] * 100}
                          for t, c in r["capital_by_ticker"].items()])
-    st.dataframe(conc, hide_index=True, use_container_width=True, column_config={
+    st.dataframe(conc, hide_index=True, width="stretch", column_config={
         "capital at risk": st.column_config.NumberColumn(format="$%.0f"),
         "concentration": st.column_config.NumberColumn(format="%.1f%%", help="of max capital at risk")})
     with st.expander("Limits"):

@@ -69,7 +69,7 @@ def _results() -> None:
         "tickers": ",".join(r["params"]["tickers"]), "from": r["params"]["start"], "to": r["params"]["end"],
         "ann. return": (r["metrics"] or {}).get("annualized_return"), "max DD": (r["metrics"] or {}).get("max_drawdown"),
         "Sharpe": (r["metrics"] or {}).get("sharpe"), "error": r["error"] or ""} for r in runs])
-    st.dataframe(table, hide_index=True, use_container_width=True, column_config={
+    st.dataframe(table, hide_index=True, width="stretch", column_config={
         "ann. return": st.column_config.NumberColumn(format="percent"), "max DD": st.column_config.NumberColumn(format="percent"),
         "Sharpe": st.column_config.NumberColumn(format="%.2f")})
 
@@ -88,10 +88,10 @@ def _results() -> None:
     if not full:
         return
     st.dataframe(pd.DataFrame({name: {lab: _fmt(run["metrics"].get(key), kind) for key, lab, kind in METRIC_ROWS}
-                               for name, run in full.items()}), use_container_width=True)
+                               for name, run in full.items()}), width="stretch")
     a, b = st.columns(2)
-    a.plotly_chart(charts.equity_compare(full), use_container_width=True)
-    b.plotly_chart(charts.drawdown_compare(full), use_container_width=True)
+    a.plotly_chart(charts.equity_compare(full), width="stretch")
+    b.plotly_chart(charts.drawdown_compare(full), width="stretch")
     st.caption("Option prices are modelled (Black-Scholes on a realized-vol IV proxy), fills happen the bar after the signal, "
                "with commissions and slippage. This tests mechanics and risk shape, not real-market edge.")
 

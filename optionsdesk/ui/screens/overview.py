@@ -51,7 +51,7 @@ def _body() -> None:
                 "": DOT.get(a["status"], "⚪") + (" ⏱" if a["stale"] else ""), "agent": a["agent"], "status": a["status"],
                 "last heartbeat": a["last_heartbeat"], "last run": a["last_run"], "restarts": a["restarts"],
                 "last error": a["last_error"] or ""} for a in agents])
-            st.dataframe(df, hide_index=True, use_container_width=True)
+            st.dataframe(df, hide_index=True, width="stretch")
             if any(a["stale"] for a in agents):
                 st.warning("⏱ = no heartbeat recently.")
     with right:
