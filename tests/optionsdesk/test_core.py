@@ -21,8 +21,12 @@ def test_defaults_are_paper():
 
 def test_live_requires_explicit_flag():
     with pytest.raises(ValidationError):
-        Settings(mode="live")
-    s = Settings(mode="live", allow_live=True)
+        Settings(mode="live", data_source="ibkr", execution_backend="ibkr")
+    with pytest.raises(ValidationError):
+        Settings(mode="live", allow_live=True)  # simulated broker/data must not pose as live
+    with pytest.raises(ValidationError):
+        Settings(mode="live", allow_live=True, data_source="simulated", execution_backend="ibkr")
+    s = Settings(mode="live", allow_live=True, data_source="ibkr", execution_backend="ibkr")
     assert s.ibkr_port == 7496
 
 

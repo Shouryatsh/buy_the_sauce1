@@ -20,7 +20,7 @@ EXP = date(2025, 7, 11)
 
 
 def make(mode="paper", **kw):
-    extra = {"allow_live": True} if mode == "live" else {}
+    extra = {"allow_live": True, "data_source": "ibkr", "execution_backend": "ibkr"} if mode == "live" else {}
     s = Settings(mode=mode, heartbeat_interval_seconds=0.05, **extra, **kw)
     return Context(settings=s, bus=EventBus(), db=Database(":memory:"))
 

@@ -115,7 +115,7 @@ IBKR_PAPER_PORT: int = 7497
 IBKR_LIVE_PORT: int = 7496
 IBKR_GATEWAY_LIVE_PORT: int = 4002
 IBKR_CLIENT_ID: int = 7
-USE_PAPER_ACCOUNT: bool = True   # default paper for dev; flip only when ready for live
+USE_PAPER_ACCOUNT: bool = False  # live account (port 7496); the dashboard no longer offers paper
 
 # ---------------------------------------------------------------------------
 # Persistence

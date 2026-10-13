@@ -29,11 +29,10 @@ def _body() -> None:
                 st.rerun()
 
     st.subheader("Orders awaiting confirmation")
-    orders = fetch("/orders", limit=200) or []
+    orders = [o for o in (fetch("/orders", limit=200) or []) if not o["paper"]]
     pending = [o for o in orders if o["status"] == "pending_confirmation"]
     if not pending:
-        st.caption("None. " + ("Live orders always wait here for you." if live_mode else
-                                "Paper orders auto-execute (auto_execute_paper)."))
+        st.caption("None. Live orders always wait here for your confirmation.")
     ack = False
     if pending and live_mode:
         st.error("LIVE trading: confirming sends a real order.")
@@ -51,7 +50,7 @@ def _body() -> None:
 
     st.subheader("Order log")
     if orders:
-        df = pd.DataFrame(orders)[["created_at", "symbol", "strategy", "status", "paper", "fill_price", "detail", "reason", "correlation_id"]]
+        df = pd.DataFrame(orders)[["created_at", "symbol", "strategy", "status", "fill_price", "detail", "reason", "correlation_id"]]
         st.dataframe(df, hide_index=True, width="stretch")
     else:
         st.caption("No orders yet.")

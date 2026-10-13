@@ -47,10 +47,10 @@
             "problemMatcher": []
         },
         {
-            "label": "optionsdesk: API + agents (IBKR paper 7497)",
+            "label": "optionsdesk: API + agents (LIVE, IBKR 7496)",
             "type": "shell",
             "command": "${workspaceFolder}/.venv/Scripts/python.exe",
-            "args": ["-m", "optionsdesk", "serve", "--port", "8000"],
+            "args": ["-m", "optionsdesk", "serve", "--port", "8000", "--i-understand-live"],
             "options": {"cwd": "${workspaceFolder}"},
             "isBackground": true,
             "problemMatcher": []

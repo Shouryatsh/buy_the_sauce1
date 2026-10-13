@@ -1,7 +1,9 @@
 # optionsdesk configuration. Environment overrides: OPTIONSDESK_<KEY>, nested with "__".
-mode: paper          # paper (port 7497) | live (needs allow_live: true and manual confirmation)
-allow_live: false
-db_path: optionsdesk.db
+mode: live           # live: IBKR port 7496. Needs allow_live, --i-understand-live, and a manual confirmation per order
+allow_live: true
+data_source: ibkr
+execution_backend: ibkr
+db_path: optionsdesk_live.db
 tickers: [AAPL, MSFT, KO, JPM, V]
 earnings_file: earnings_calendar.csv
 poll_interval_seconds: 60

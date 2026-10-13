@@ -145,6 +145,8 @@ class Settings(BaseSettings):
     def _live_needs_flag(self) -> "Settings":
         if self.mode is Mode.LIVE and not self.allow_live:
             raise ValueError("mode=live requires allow_live=true in config")
+        if self.mode is Mode.LIVE and (self.data_source != "ibkr" or self.execution_backend != "ibkr"):
+            raise ValueError("mode=live requires data_source=ibkr and execution_backend=ibkr (no simulated data or broker)")
         return self
 
     @property

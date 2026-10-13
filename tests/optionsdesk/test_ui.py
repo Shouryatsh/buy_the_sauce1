@@ -148,7 +148,7 @@ def test_overview_shows_paper_badge_metrics_and_agents(ui):
     labels = [m.label for m in at.metric]
     assert {"Portfolio value", "Realized P&L", "Unrealized P&L", "Open premium collected", "Capital deployed"} <= set(labels)
     html = " ".join(m.value for m in at.markdown)
-    assert "PAPER" in html and "trading enabled" in html
+    assert "NOT LIVE" in html and "trading enabled" in html
     assert any("agent" in df.value.columns for df in at.dataframe)
 
 
@@ -182,7 +182,7 @@ def test_controls_confirm_requires_live_acknowledgement(ui):
     sig = Signal(strategy="wheel", symbol="AAA", action=SignalAction.OPEN, reason="r",
                  legs=[Leg(right="P", strike=95.0, expiry=TODAY, quantity=-1, price=1.0)])
     intent = sig.derive(OrderIntent, signal_id=sig.id, symbol="AAA", strategy="wheel", legs=sig.legs, reason="r")
-    ui.ctx.db.save_order_intent("ord1", intent, "pending_confirmation", True)
+    ui.ctx.db.save_order_intent("ord1", intent, "pending_confirmation", False)
     at = run_page("controls")
     assert any(b.key == "c_ord1" for b in at.button)
     at.button(key="c_ord1").click().run()  # agent has no such awaiting order -> 404 shown, no crash

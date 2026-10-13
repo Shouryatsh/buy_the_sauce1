@@ -82,13 +82,8 @@ def _price_history(symbol: str, period_years: int = 1):
 # ---------------------------------------------------------------------------
 
 st.sidebar.title("Options Wheel Dashboard")
-use_paper = st.sidebar.radio(
-    "IBKR account", ["Paper", "Live"], index=0 if wc.USE_PAPER_ACCOUNT else 1
-) == "Paper"
-if not use_paper:
-    st.sidebar.error("LIVE account selected — this dashboard is read-only, but double-check TWS is pointed where you expect.")
-else:
-    st.sidebar.success("Paper account — safe to explore.")
+use_paper = False  # live-only: no paper option
+st.sidebar.warning(f"LIVE account (port {wc.IBKR_LIVE_PORT}). Read-only: this dashboard never places orders.")
 
 if "ibkr_client" not in st.session_state:
     st.session_state.ibkr_client = None

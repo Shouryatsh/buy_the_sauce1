@@ -15,6 +15,7 @@ def _body() -> None:
         st.info("No signals yet.")
         return
     df = pd.DataFrame(rows)
+    df = df[df["paper"].fillna(0) != 1]  # live only: hide anything tied to a paper order
     f = st.columns(4)
     strat = f[0].multiselect("Strategy", sorted(df["strategy"].unique()), key="j_strat")
     sym = f[1].multiselect("Symbol", sorted(df["symbol"].unique()), key="j_sym")
@@ -29,10 +30,9 @@ def _body() -> None:
     if stat:
         df = df[df["order_status"].isin(stat)]
 
-    st.dataframe(df[["ts", "strategy", "symbol", "action", "verdict", "order_status", "paper", "fill_price", "reason", "correlation_id"]],
+    st.dataframe(df[["ts", "strategy", "symbol", "action", "verdict", "order_status", "fill_price", "reason", "correlation_id"]],
                  hide_index=True, width="stretch", column_config={
-                     "ts": st.column_config.DatetimeColumn(format="MMM D, HH:mm:ss"),
-                     "paper": st.column_config.CheckboxColumn("paper")})
+                     "ts": st.column_config.DatetimeColumn(format="MMM D, HH:mm:ss")})
 
     if df.empty:
         return

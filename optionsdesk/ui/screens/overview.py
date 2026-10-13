@@ -19,10 +19,12 @@ def _body() -> None:
     o = fetch("/overview")
     if o is None:
         return
-    mode_badge = badge("PAPER", theme.GREEN) if o["mode"] == "paper" else badge("LIVE", theme.RED)
+    mode_badge = badge("LIVE", theme.RED) if o["mode"] == "live" else badge("NOT LIVE (paper mode)", theme.AMBER)
     ks = badge("KILL SWITCH ENGAGED", theme.RED) if o["kill_switch"] else badge("trading enabled", theme.GREEN)
     st.markdown(f"{mode_badge} {ks} &nbsp; data: {quality_badges(o['data_quality'])} &nbsp; "
                 f"source: `{o['data_source']}` / execution: `{o['execution_backend']}`", unsafe_allow_html=True)
+    if o["mode"] != "live":
+        st.warning("Backend is not in live mode. Set `mode: live` and `allow_live: true` in config.yaml and start it with `--i-understand-live`.")
 
     c = st.columns(4)
     c[0].metric("Portfolio value", f"${o['portfolio_value']:,.0f}", f"{o['portfolio_value'] - o['starting_capital']:+,.0f}")

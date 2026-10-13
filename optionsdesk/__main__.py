@@ -29,6 +29,8 @@ def serve(
     if agents:
         os.environ["OPTIONSDESK_AGENTS"] = json.dumps([a.strip() for a in agents.split(",") if a.strip()])
     if simulated:
+        os.environ["OPTIONSDESK_MODE"] = "paper"
+        os.environ["OPTIONSDESK_ALLOW_LIVE"] = "false"
         os.environ["OPTIONSDESK_DATA_SOURCE"] = "simulated"
         os.environ["OPTIONSDESK_EXECUTION_BACKEND"] = "simulated"
     s = Settings()

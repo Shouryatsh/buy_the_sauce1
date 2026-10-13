@@ -1,6 +1,7 @@
 # optionsdesk — multi-agent wheel + straddle system
 
-Paper trading by default. Agents are asyncio modules that talk only through a typed event bus and a SQLite store.
+Live by default (see `config.yaml`): `mode: live`, IBKR port 7496, every order needs a manual confirmation. `--simulated` forces an offline paper demo.
+Agents are asyncio modules that talk only through a typed event bus and a SQLite store.
 A FastAPI service exposes REST + Server-Sent Events; the Streamlit dashboard reads that API and never talks to IBKR.
 
 ```
@@ -25,8 +26,8 @@ order, into the JSON logs and the journal.
 Backend (orchestrator + all agents + API on http://127.0.0.1:8000):
 
 ```powershell
-python -m optionsdesk serve --simulated        # fully offline: simulated data and simulated broker
-python -m optionsdesk serve                    # IBKR data (TWS paper, port 7497); orders still go to the simulated broker
+python -m optionsdesk serve --i-understand-live   # live: IBKR data + orders on 7496, each order confirmed by you in the dashboard
+python -m optionsdesk serve --simulated           # offline paper demo (separate behaviour, forces mode=paper)
 ```
 
 Dashboard (new, port 8502; your existing wheel dashboard on 8501 is untouched):
