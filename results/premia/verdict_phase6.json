@@ -1,0 +1,32 @@
+{
+ "phase": "phase6",
+ "verdict": "PASS",
+ "checks": [
+  {
+   "criterion": "accounting reconciles (cash + marked positions = equity, every day, also per underlying)",
+   "pass": true,
+   "evidence": "2 passed in 34.59s (2 tests)"
+  },
+  {
+   "criterion": "no lookahead (changing future data leaves past decisions unchanged)",
+   "pass": true,
+   "evidence": "1 passed in 29.97s (1 test)"
+  },
+  {
+   "criterion": "fills at the next bar with spread, slippage and commission",
+   "pass": true,
+   "evidence": "1 passed in 14.94s (1 test)"
+  },
+  {
+   "criterion": "assignment at expiry and early assignment",
+   "pass": true,
+   "evidence": "2 passed in 7.71s (2 tests)"
+  },
+  {
+   "criterion": "hedge costs and hedge policies",
+   "pass": true,
+   "evidence": "3 passed in 6.09s (3 tests)"
+  }
+ ],
+ "at": "2026-11-08T15:48:00"
+}

@@ -1,0 +1,22 @@
+{
+ "phase": "phase4",
+ "verdict": "PASS",
+ "checks": [
+  {
+   "criterion": "engines run to specification (unit tests)",
+   "pass": true,
+   "evidence": "tests/premia/test_engine.py"
+  },
+  {
+   "criterion": "model decisions recorded vs fixed-rule baselines (keep / drop)",
+   "pass": true,
+   "evidence": "wheel model -0.06 vs baseline -0.50 -> KEEP; straddle model -0.77 vs baseline -0.83 -> KEEP"
+  },
+  {
+   "criterion": "band hedge decision recorded (on/inside time-hedge frontier = keep)",
+   "pass": true,
+   "evidence": "band points dominated by time hedging: none"
+  }
+ ],
+ "at": "2026-11-08T17:46:30"
+}

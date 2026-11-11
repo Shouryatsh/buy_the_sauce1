@@ -1,0 +1,27 @@
+{
+ "phase": "phase5",
+ "verdict": "FAIL",
+ "checks": [
+  {
+   "criterion": "|beta| to SPY < 0.10 and Newey-West |t| < 2",
+   "pass": true,
+   "evidence": "beta 0.005, t 1.51"
+  },
+  {
+   "criterion": "|correlation| to SPY < 0.20",
+   "pass": true,
+   "evidence": "corr 0.068"
+  },
+  {
+   "criterion": "|correlation| of per-name P&L to its underlying < 0.20 (held-days weighted)",
+   "pass": true,
+   "evidence": "wheel 0.094 (median |corr| 0.180), straddle 0.064"
+  },
+  {
+   "criterion": "net annualised return after costs > 0",
+   "pass": false,
+   "evidence": "CAGR -0.86%, Sharpe -0.77, mean-return HAC t -2.96"
+  }
+ ],
+ "at": "2026-11-08T17:46:30"
+}

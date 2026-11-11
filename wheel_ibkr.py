@@ -128,6 +128,39 @@ class TradeStats:
     trade_count: int = 0
 
 
+def archive_fill(fill) -> None:
+    """Store one ib_insync Fill in the local trade log (once per execId)."""
+    c, e, cr = fill.contract, fill.execution, fill.commissionReport
+    try:
+        wheel_db.record_fill(
+            symbol=c.symbol,
+            sec_type=c.secType,
+            action=e.side,
+            quantity=e.shares,
+            price=e.price,
+            conid=c.conId,
+            closed_date=e.time.date().isoformat() if e.time else None,
+            exec_id=e.execId or None,
+            exec_time=e.time.isoformat() if e.time else None,
+            opt_right=getattr(c, "right", None) or None,
+            strike=getattr(c, "strike", None) or None,
+            expiry=getattr(c, "lastTradeDateOrContractMonth", None) or None,
+            multiplier=float(c.multiplier) if getattr(c, "multiplier", "") else None,
+            # A CommissionReport with no execId is ib_insync's empty default, not "$0".
+            commission=cr.commission if cr is not None and cr.execId else None,
+        )
+    except Exception as exc:   # never let archiving break the event loop
+        logger.warning("could not archive fill %s: %s", getattr(e, "execId", "?"), exc)
+
+
+def _archive_commission(report) -> None:
+    try:
+        if report is not None and report.execId:
+            wheel_db.record_commission(report.execId, report.commission)
+    except Exception as exc:
+        logger.warning("could not archive commission %s: %s", getattr(report, "execId", "?"), exc)
+
+
 class WheelIBKRClient:
     """Thread-safe (see module docstring), read-only wrapper around ib_insync."""
 
@@ -305,6 +338,24 @@ class WheelIBKRClient:
     # Trade history / realized P&L
     # ------------------------------------------------------------------
 
+    def archive_recent_fills(self, days: int = 7) -> int:
+        """Store every fill IBKR still reports (each once, by execId).
+        Returns how many fills IBKR reported."""
+        fills = self.get_recent_fills(days=days)
+        for f in fills:
+            archive_fill(f)
+        return len(fills)
+
+    def enable_fill_archiving(self) -> None:
+        """Archive fills the moment they happen (and their commission when
+        IBKR reports it), instead of only when a page asks for history.
+        Idempotent: handlers are attached once per client."""
+        if getattr(self, "_archiving", False):
+            return
+        self._ib.execDetailsEvent += lambda _trade, fill: archive_fill(fill)
+        self._ib.commissionReportEvent += lambda _trade, fill, report: _archive_commission(report)
+        self._archiving = True
+
     def get_recent_fills(self, days: int = 30) -> list:
         """Return ib_insync Fill objects from the last *days* (subject to
         IBKR's execution-report retention window — see module docstring)."""
@@ -339,15 +390,7 @@ class WheelIBKRClient:
         # Archive every fill seen -- see module docstring on why IBKR's own
         # API can't be trusted to still have this next time we ask.
         for f in fills:
-            wheel_db.record_fill(
-                symbol=f.contract.symbol,
-                sec_type=f.contract.secType,
-                action=f.execution.side,
-                quantity=f.execution.shares,
-                price=f.execution.price,
-                conid=f.contract.conId,
-                closed_date=f.execution.time.date().isoformat() if f.execution.time else None,
-            )
+            archive_fill(f)
 
         if not fills:
             return TradeStats()

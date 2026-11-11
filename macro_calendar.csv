@@ -1,0 +1,83 @@
+date,time_et,event,category,source
+# FOMC: rate decision on the second meeting day, 2:00 PM ET. SEP = Summary of Economic Projections ("dot plot").
+# Source: federalreserve.gov/monetarypolicy/fomccalendars.htm (2027 dates tentative per the Fed). Verified 2026-10-13.
+2025-01-29,14:00,FOMC rate decision,FOMC,federalreserve.gov
+2025-03-19,14:00,FOMC rate decision + SEP,FOMC,federalreserve.gov
+2025-05-07,14:00,FOMC rate decision,FOMC,federalreserve.gov
+2025-06-18,14:00,FOMC rate decision + SEP,FOMC,federalreserve.gov
+2025-07-30,14:00,FOMC rate decision,FOMC,federalreserve.gov
+2025-09-17,14:00,FOMC rate decision + SEP,FOMC,federalreserve.gov
+2025-10-29,14:00,FOMC rate decision,FOMC,federalreserve.gov
+2025-12-10,14:00,FOMC rate decision + SEP,FOMC,federalreserve.gov
+2026-01-28,14:00,FOMC rate decision,FOMC,federalreserve.gov
+2026-03-18,14:00,FOMC rate decision + SEP,FOMC,federalreserve.gov
+2026-04-29,14:00,FOMC rate decision,FOMC,federalreserve.gov
+2026-06-17,14:00,FOMC rate decision + SEP,FOMC,federalreserve.gov
+2026-07-29,14:00,FOMC rate decision,FOMC,federalreserve.gov
+2026-09-16,14:00,FOMC rate decision + SEP,FOMC,federalreserve.gov
+2026-10-28,14:00,FOMC rate decision,FOMC,federalreserve.gov
+2026-12-09,14:00,FOMC rate decision + SEP,FOMC,federalreserve.gov
+2027-01-27,14:00,FOMC rate decision (tentative),FOMC,federalreserve.gov
+2027-03-17,14:00,FOMC rate decision + SEP (tentative),FOMC,federalreserve.gov
+2027-04-28,14:00,FOMC rate decision (tentative),FOMC,federalreserve.gov
+2027-06-09,14:00,FOMC rate decision + SEP (tentative),FOMC,federalreserve.gov
+# CPI: 8:30 AM ET. Source: bls.gov CPI release archive + schedule + bls.gov/cpi (Sep 2026 CPI). Oct 2025 CPI was not published (2025 shutdown).
+2025-01-15,08:30,CPI (Dec 2024),CPI,bls.gov
+2025-02-12,08:30,CPI (Jan),CPI,bls.gov
+2025-03-12,08:30,CPI (Feb),CPI,bls.gov
+2025-04-10,08:30,CPI (Mar),CPI,bls.gov
+2025-05-13,08:30,CPI (Apr),CPI,bls.gov
+2025-06-11,08:30,CPI (May),CPI,bls.gov
+2025-07-15,08:30,CPI (Jun),CPI,bls.gov
+2025-08-12,08:30,CPI (Jul),CPI,bls.gov
+2025-09-11,08:30,CPI (Aug),CPI,bls.gov
+2025-10-24,08:30,CPI (Sep),CPI,bls.gov
+2025-12-18,08:30,CPI (Nov),CPI,bls.gov
+2026-01-13,08:30,CPI (Dec 2025),CPI,bls.gov
+2026-02-13,08:30,CPI (Jan),CPI,bls.gov
+2026-03-11,08:30,CPI (Feb),CPI,bls.gov
+2026-04-10,08:30,CPI (Mar),CPI,bls.gov
+2026-05-12,08:30,CPI (Apr),CPI,bls.gov
+2026-06-10,08:30,CPI (May),CPI,bls.gov
+2026-07-14,08:30,CPI (Jun),CPI,bls.gov
+2026-08-12,08:30,CPI (Jul),CPI,bls.gov
+2026-09-11,08:30,CPI (Aug),CPI,bls.gov
+2026-10-14,08:30,CPI (Sep),CPI,bls.gov
+2026-11-10,08:30,CPI (Oct),CPI,bls.gov
+2026-12-10,08:30,CPI (Nov),CPI,bls.gov
+2027-01-13,08:30,CPI (Dec 2026),CPI,bls.gov
+2027-02-11,08:30,CPI (Jan),CPI,bls.gov
+2027-03-10,08:30,CPI (Feb),CPI,bls.gov
+2027-04-13,08:30,CPI (Mar),CPI,bls.gov
+2027-05-12,08:30,CPI (Apr),CPI,bls.gov
+2027-06-10,08:30,CPI (May),CPI,bls.gov
+# Employment Situation (jobs report / unemployment rate): 8:30 AM ET. Source: bls.gov empsit archive + schedule. Oct 2025 report not published (2025 shutdown).
+2025-01-10,08:30,Jobs report (Dec 2024),Jobs,bls.gov
+2025-02-07,08:30,Jobs report (Jan),Jobs,bls.gov
+2025-03-07,08:30,Jobs report (Feb),Jobs,bls.gov
+2025-04-04,08:30,Jobs report (Mar),Jobs,bls.gov
+2025-05-02,08:30,Jobs report (Apr),Jobs,bls.gov
+2025-06-06,08:30,Jobs report (May),Jobs,bls.gov
+2025-07-03,08:30,Jobs report (Jun),Jobs,bls.gov
+2025-08-01,08:30,Jobs report (Jul),Jobs,bls.gov
+2025-09-05,08:30,Jobs report (Aug),Jobs,bls.gov
+2025-11-20,08:30,Jobs report (Sep),Jobs,bls.gov
+2025-12-16,08:30,Jobs report (Nov),Jobs,bls.gov
+2026-01-09,08:30,Jobs report (Dec 2025),Jobs,bls.gov
+2026-02-11,08:30,Jobs report (Jan),Jobs,bls.gov
+2026-03-06,08:30,Jobs report (Feb),Jobs,bls.gov
+2026-04-03,08:30,Jobs report (Mar),Jobs,bls.gov
+2026-05-08,08:30,Jobs report (Apr),Jobs,bls.gov
+2026-06-05,08:30,Jobs report (May),Jobs,bls.gov
+2026-07-02,08:30,Jobs report (Jun),Jobs,bls.gov
+2026-08-07,08:30,Jobs report (Jul),Jobs,bls.gov
+2026-09-04,08:30,Jobs report (Aug),Jobs,bls.gov
+2026-10-02,08:30,Jobs report (Sep),Jobs,bls.gov
+2026-11-06,08:30,Jobs report (Oct),Jobs,bls.gov
+2026-12-04,08:30,Jobs report (Nov),Jobs,bls.gov
+2027-01-08,08:30,Jobs report (Dec 2026),Jobs,bls.gov
+2027-02-05,08:30,Jobs report (Jan),Jobs,bls.gov
+2027-03-05,08:30,Jobs report (Feb),Jobs,bls.gov
+2027-04-02,08:30,Jobs report (Mar),Jobs,bls.gov
+2027-05-07,08:30,Jobs report (Apr),Jobs,bls.gov
+2027-06-04,08:30,Jobs report (May),Jobs,bls.gov

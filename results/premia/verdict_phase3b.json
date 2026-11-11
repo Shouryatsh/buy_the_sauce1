@@ -1,0 +1,27 @@
+{
+ "phase": "phase3b",
+ "verdict": "FAIL",
+ "checks": [
+  {
+   "criterion": "Taylor residual <= 10 % of P&L variance on simulated paths",
+   "pass": true,
+   "evidence": "tests/premia/test_models.py::test_taylor_attribution_explains_small_daily_moves"
+  },
+  {
+   "criterion": "alpha test size <= 10 %, power >= 80 % at the minimum detectable effect",
+   "pass": true,
+   "evidence": "tests/premia/test_models.py::test_alpha_classifier_power_and_false_positive_rate"
+  },
+  {
+   "criterion": "as pre-registered: detects annual Sharpe 0.5 in >= 80 % of simulations",
+   "pass": false,
+   "evidence": "impossible at realistic sample lengths: 80 % power at Sharpe 0.5 needs ~31 years of daily data (2.8/sqrt(years))"
+  },
+  {
+   "criterion": "every backtested trade type classified",
+   "pass": true,
+   "evidence": "[('cc', 'risk premium'), ('csp', 'risk premium'), ('straddle', 'risk premium'), ('tail', 'insufficient data')]; statistically significant residual (not alpha, model-priced): ['cc']"
+  }
+ ],
+ "at": "2026-11-08T17:46:30"
+}

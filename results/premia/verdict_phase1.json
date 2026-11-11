@@ -1,0 +1,17 @@
+{
+ "phase": "phase1",
+ "verdict": "PASS",
+ "checks": [
+  {
+   "criterion": "data-rule tests pass (splits, dividends, bad prints, carry-forward, membership, point-in-time facts)",
+   "pass": true,
+   "evidence": "9 passed in 5.42s"
+  },
+  {
+   "criterion": "IV coverage of index members (member-quarters since 2010, after exclusions) >= 70 %",
+   "pass": true,
+   "evidence": "79.4% mean (prices 81.5%); the shortfall is the residual survivorship bias"
+  }
+ ],
+ "at": "2026-11-08T15:44:32"
+}

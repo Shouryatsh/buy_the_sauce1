@@ -1,0 +1,141 @@
+{
+ "meta": {
+  "snapshot": 5,
+  "expiry": "2026-11-25",
+  "days": 30,
+  "spot": 7679.73
+ },
+ "regime_differences": {
+  "delta": {
+   "0.85": {
+    "sticky_delta_vs_strike": 0.024634123571761216,
+    "local_vol_vs_strike": -0.02466427789476923,
+    "sticky_strike": -0.0357585574358286
+   },
+   "0.9": {
+    "sticky_delta_vs_strike": 0.0457201446058073,
+    "local_vol_vs_strike": -0.045714937835115,
+    "sticky_strike": -0.07225510970332817
+   },
+   "0.95": {
+    "sticky_delta_vs_strike": 0.08293986076896473,
+    "local_vol_vs_strike": -0.08278975593916138,
+    "sticky_strike": -0.17340325030199116
+   },
+   "0.975": {
+    "sticky_delta_vs_strike": 0.10119529347794781,
+    "local_vol_vs_strike": -0.10105660461801619,
+    "sticky_strike": -0.29132225092655073
+   },
+   "1.0": {
+    "sticky_delta_vs_strike": 0.09544400281898807,
+    "local_vol_vs_strike": -0.09545831824421175,
+    "sticky_strike": -0.4927144298253146
+   },
+   "1.025": {
+    "sticky_delta_vs_strike": 0.048558236758576956,
+    "local_vol_vs_strike": -0.04807156475593133,
+    "sticky_strike": 0.25411060086305254
+   },
+   "1.05": {
+    "sticky_delta_vs_strike": 0.00563946492623825,
+    "local_vol_vs_strike": -0.0048669124267360225,
+    "sticky_strike": 0.07805181345027944
+   }
+  },
+  "vanna": {
+   "0.85": {
+    "sticky_delta_vs_strike": 0.2354275818848953,
+    "local_vol_vs_strike": -0.2346275102835379,
+    "sticky_strike": -0.41732703667500115
+   },
+   "0.9": {
+    "sticky_delta_vs_strike": 0.3579563581784365,
+    "local_vol_vs_strike": -0.3563759979024017,
+    "sticky_strike": -0.7391574049690877
+   },
+   "0.95": {
+    "sticky_delta_vs_strike": 0.3530787330184125,
+    "local_vol_vs_strike": -0.3534433567934594,
+    "sticky_strike": -1.1609309784411623
+   },
+   "0.975": {
+    "sticky_delta_vs_strike": 0.17029096818567047,
+    "local_vol_vs_strike": -0.17295609772785858,
+    "sticky_strike": -1.0312080503617989
+   },
+   "1.0": {
+    "sticky_delta_vs_strike": 0.00962231768925293,
+    "local_vol_vs_strike": -0.00962022406128192,
+    "sticky_strike": 0.057782496306204474
+   },
+   "1.025": {
+    "sticky_delta_vs_strike": 0.17641931837084668,
+    "local_vol_vs_strike": -0.182133089300905,
+    "sticky_strike": 1.7715604253808095
+   },
+   "1.05": {
+    "sticky_delta_vs_strike": 0.08907491719762994,
+    "local_vol_vs_strike": -0.08896114513426823,
+    "sticky_strike": 1.7840003387923584
+   }
+  },
+  "volga": {
+   "0.85": {
+    "sticky_delta_vs_strike": 0.0,
+    "local_vol_vs_strike": 0.0,
+    "sticky_strike": 1660.0321306009391
+   },
+   "0.9": {
+    "sticky_delta_vs_strike": 0.0,
+    "local_vol_vs_strike": 0.0,
+    "sticky_strike": 2383.8859454599515
+   },
+   "0.95": {
+    "sticky_delta_vs_strike": 0.0,
+    "local_vol_vs_strike": 0.0,
+    "sticky_strike": 2422.4606323878106
+   },
+   "0.975": {
+    "sticky_delta_vs_strike": 0.0,
+    "local_vol_vs_strike": 0.0,
+    "sticky_strike": 1262.207798899908
+   },
+   "1.0": {
+    "sticky_delta_vs_strike": 0.0,
+    "local_vol_vs_strike": 0.0,
+    "sticky_strike": -2.597709317342378
+   },
+   "1.025": {
+    "sticky_delta_vs_strike": 0.0,
+    "local_vol_vs_strike": 0.0,
+    "sticky_strike": 2618.7379702150793
+   },
+   "1.05": {
+    "sticky_delta_vs_strike": 0.0,
+    "local_vol_vs_strike": 0.0,
+    "sticky_strike": 5627.2598685563935
+   }
+  }
+ },
+ "vanna_volga": {
+  "snapshot": 5,
+  "expiry": "2026-11-25",
+  "pivots_K": [
+   7452.745880334291,
+   7699.964185129128,
+   7895.264357273488
+  ],
+  "pivot_vols": [
+   0.17464110302858668,
+   0.14304848758737945,
+   0.12571504339142214
+  ],
+  "n_quotes": 81,
+  "rmse_vv_vs_market_volpts_between_pivots": 0.16414579142186672,
+  "rmse_svi_vs_market_volpts_between_pivots": 0.09736885206243023,
+  "rmse_vv_vs_market_volpts_all": 9.39430744417771,
+  "rmse_svi_vs_market_volpts_all": 0.2863845682371682,
+  "note": "vanna-volga is a 3-point interpolation: good between the pivots, poor in the wings; as a mispricing signal it cannot be tested without historical chains (kept off)"
+ }
+}

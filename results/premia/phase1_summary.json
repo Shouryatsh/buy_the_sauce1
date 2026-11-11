@@ -1,0 +1,20 @@
+{
+ "iv_coverage_mean": 0.7939448189514094,
+ "price_coverage_mean": 0.8152554144520192,
+ "bad_iv_prints_removed": 2858,
+ "coverage_first": {
+  "date": "2010-01-01",
+  "members": 433,
+  "with_prices": 283,
+  "with_iv": 269,
+  "iv_coverage": 0.6212471131639723
+ },
+ "coverage_last": {
+  "date": "2026-10-01",
+  "members": 396,
+  "with_prices": 394,
+  "with_iv": 392,
+  "iv_coverage": 0.98989898989899
+ },
+ "tests_tail": "9 passed in 5.42s"
+}

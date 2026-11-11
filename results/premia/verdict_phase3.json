@@ -1,0 +1,37 @@
+{
+ "phase": "phase3",
+ "verdict": "FAIL",
+ "checks": [
+  {
+   "criterion": "SVI median IV RMSE <= 0.5 vol pt on real chains",
+   "pass": true,
+   "evidence": "median 0.366 over 136 slices"
+  },
+  {
+   "criterion": ">= 90 % of slices butterfly- and calendar-clean inside the quoted range",
+   "pass": true,
+   "evidence": "99.3%"
+  },
+  {
+   "criterion": "local-vol PDE reprices quoted vanillas (80-120 %) within 0.5 vol pt",
+   "pass": true,
+   "evidence": "max |error| 0.129 vol pt over 1805 quotes; 772 quotes on slices with calendar arbitrage excluded"
+  },
+  {
+   "criterion": "HAR/GARCH beats trailing RV on QLIKE for >= 60 % of names",
+   "pass": true,
+   "evidence": "har_iv: 99.5% of 201 names"
+  },
+  {
+   "criterion": "pooled Diebold-Mariano significant",
+   "pass": true,
+   "evidence": "har_iv: t = -13.21"
+  },
+  {
+   "criterion": "FHS calibration error <= 3 pts and <= Black-Scholes at IV",
+   "pass": false,
+   "evidence": "FHS 3.70 pts vs BS(IV) 6.19 pts over 106020 forecasts"
+  }
+ ],
+ "at": "2026-11-08T13:46:42"
+}

@@ -66,6 +66,15 @@ _TRADE_LOG_MIGRATIONS = [
     ("closed_date", "TEXT"),           # the date the trade actually closed/expired (not when we logged it)
     ("notes", "TEXT"),
     ("source", "TEXT DEFAULT 'ibkr'"),  # 'ibkr' (from a live fill) or 'manual'
+    # Execution detail, so a fill is stored once (by IBKR's execId) and the
+    # trade can be analysed later (strike/expiry/commission).
+    ("exec_id", "TEXT"),
+    ("exec_time", "TEXT"),             # IBKR execution timestamp (UTC ISO)
+    ("opt_right", "TEXT"),             # "P"/"C" for options
+    ("strike", "REAL"),
+    ("expiry", "TEXT"),                # YYYYMMDD
+    ("multiplier", "REAL"),
+    ("commission", "REAL"),
 ]
 
 
@@ -75,6 +84,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for col, coltype in _TRADE_LOG_MIGRATIONS:
         if col not in existing_cols:
             conn.execute(f"ALTER TABLE trade_log ADD COLUMN {col} {coltype}")
+    if "exec_id" not in existing_cols:
+        # One-time cleanup: the old UNIQUE key included logged_at (when WE saw
+        # the fill), so the same fill was stored again on every page visit.
+        conn.execute(
+            "DELETE FROM trade_log WHERE source = 'ibkr' AND id NOT IN ("
+            " SELECT MIN(id) FROM trade_log WHERE source = 'ibkr'"
+            " GROUP BY conid, action, quantity, price, closed_date)"
+        )
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_trade_log_exec_id ON trade_log(exec_id) "
+                 "WHERE exec_id IS NOT NULL")
 
 
 @contextmanager
@@ -111,19 +130,51 @@ def record_fill(
     conid: int,
     realized_pnl: float = 0.0,
     closed_date: str = None,
+    exec_id: str = None,
+    exec_time: str = None,
+    opt_right: str = None,
+    strike: float = None,
+    expiry: str = None,
+    multiplier: float = None,
+    commission: float = None,
     db_path: str = wc.WHEEL_DB_PATH,
 ) -> None:
-    """Archive one raw fill leg as seen from IBKR's live execution feed.
-    Safe to call repeatedly for the same fill -- the UNIQUE constraint on
-    (conid, logged_at, action, quantity, price) makes this an upsert-once."""
+    """Archive one fill from IBKR's execution feed, at most once per execId.
+
+    A row archived before execIds were stored (same contract, side, size,
+    price and date, exec_id empty) is upgraded in place rather than
+    duplicated."""
     logged_at = datetime.now().isoformat(timespec="seconds")
+    detail = (exec_id, exec_time, opt_right, strike, expiry, multiplier)
     with _connect(db_path) as conn:
+        if exec_id and conn.execute("SELECT 1 FROM trade_log WHERE exec_id = ?", (exec_id,)).fetchone():
+            if commission is not None:
+                conn.execute("UPDATE trade_log SET commission = ? WHERE exec_id = ?", (commission, exec_id))
+            return
+        legacy = conn.execute(
+            "SELECT id FROM trade_log WHERE source = 'ibkr' AND exec_id IS NULL AND conid = ? AND action = ? "
+            "AND quantity = ? AND price = ? AND closed_date IS ? LIMIT 1",
+            (conid, action, quantity, price, closed_date),
+        ).fetchone() if exec_id else None
+        if legacy:
+            conn.execute(
+                "UPDATE trade_log SET exec_id=?, exec_time=?, opt_right=?, strike=?, expiry=?, multiplier=?, "
+                "commission=COALESCE(?, commission) WHERE id=?", (*detail, commission, legacy[0]))
+            return
         conn.execute(
             "INSERT OR IGNORE INTO trade_log "
-            "(logged_at, symbol, sec_type, action, quantity, price, realized_pnl, conid, closed_date, source) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ibkr')",
-            (logged_at, symbol, sec_type, action, quantity, price, realized_pnl, conid, closed_date),
+            "(logged_at, symbol, sec_type, action, quantity, price, realized_pnl, conid, closed_date, source, "
+            " exec_id, exec_time, opt_right, strike, expiry, multiplier, commission) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ibkr', ?, ?, ?, ?, ?, ?, ?)",
+            (logged_at, symbol, sec_type, action, quantity, price, realized_pnl, conid, closed_date,
+             *detail, commission),
         )
+
+
+def record_commission(exec_id: str, commission: float, db_path: str = wc.WHEEL_DB_PATH) -> None:
+    """IBKR reports commission separately, shortly after the execution."""
+    with _connect(db_path) as conn:
+        conn.execute("UPDATE trade_log SET commission = ? WHERE exec_id = ?", (commission, exec_id))
 
 
 def record_manual_trade(
@@ -155,7 +206,7 @@ def get_trade_log(limit: int = 200, db_path: str = wc.WHEEL_DB_PATH) -> list[dic
     with _connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT * FROM trade_log ORDER BY COALESCE(closed_date, logged_at) DESC LIMIT ?", (limit,)
+            "SELECT * FROM trade_log ORDER BY COALESCE(exec_time, closed_date, logged_at) DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
 

@@ -36,3 +36,31 @@ _DEFAULT_WATCHLIST: list[str] = [
 
 _shortlist = load_shortlist(wc.SHORTLIST_PATH)
 WHEEL_WATCHLIST: list[str] = _shortlist if _shortlist else _DEFAULT_WATCHLIST
+
+
+# ---------------------------------------------------------------------------
+# Manual exclusions — tickers you've removed by hand. Kept in their own file
+# so they survive a re-run of scan_universe.py (which rewrites the shortlist).
+# Managed from the dashboard's Fundamentals page.
+# ---------------------------------------------------------------------------
+import json
+from pathlib import Path
+
+EXCLUSIONS_PATH = Path(__file__).with_name("wheel_exclusions.json")
+
+
+def load_exclusions() -> set[str]:
+    try:
+        return {t.upper() for t in json.loads(EXCLUSIONS_PATH.read_text())}
+    except (FileNotFoundError, ValueError):
+        return set()
+
+
+def save_exclusions(tickers) -> None:
+    EXCLUSIONS_PATH.write_text(json.dumps(sorted({t.upper() for t in tickers}), indent=2))
+
+
+def active_watchlist() -> list[str]:
+    """The screener universe minus manual exclusions (read fresh each call)."""
+    excluded = load_exclusions()
+    return [t for t in WHEEL_WATCHLIST if t.upper() not in excluded]

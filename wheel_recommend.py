@@ -4,9 +4,14 @@ fundamentals screen, and sizes each suggestion against spare capital,
 per-name concentration, and progress toward the monthly income target.
 
 Composite rank is a weighted geometric mean of three 0-1 normalized scores
-(quality, richness, capital efficiency) so that a name which is weak on any
-one dimension can't be masked by strength on another, while
+(quality, IV percentile, capital efficiency) so that a name which is weak on
+any one dimension can't be masked by strength on another, while
 wheel_config.RECOMMENDATION_WEIGHTS still lets you tilt the ranking.
+
+The volatility score is the stock's current implied vol as a percentile of
+its own history (McMillan): a high percentile means options are expensive
+versus their own past — better for a premium seller. It deliberately does
+not compare implied vol with realized vol.
 """
 
 from __future__ import annotations
@@ -29,13 +34,18 @@ class Recommendation:
     premium: float
     annualized_yield: float
     quality_score: float
-    richness_ratio: float | None
+    iv_percentile: float | None           # 0-100, IV vs its own history; None = no IV history
     capital_efficiency_score: float
     composite_rank: float
     capital_required: float
     contracts_suggested: int
     capital_ok: bool
     capital_notes: list
+    bid: float | None = None
+    ask: float | None = None
+    quote_type: str = "unknown"
+    delta_is_estimated: bool = False
+    open_interest: int | None = None
 
 
 def _capital_efficiency_score(candidate: OptionCandidate, spare_capital_remaining: float) -> float:
@@ -48,14 +58,14 @@ def _capital_efficiency_score(candidate: OptionCandidate, spare_capital_remainin
     return 0.7 * yield_score + 0.3 * capital_fit
 
 
-def _composite_rank(quality_norm: float, richness_norm: float, capital_eff_norm: float) -> float:
+def _composite_rank(quality_norm: float, iv_pct_norm: float, capital_eff_norm: float) -> float:
     w = wc.RECOMMENDATION_WEIGHTS
     # Weighted geometric mean; add a tiny floor so one zero score doesn't
     # collapse the whole product to zero for an otherwise-strong candidate.
     eps = 0.01
     score = (
         (quality_norm + eps) ** w["quality"]
-        * (richness_norm + eps) ** w["richness"]
+        * (iv_pct_norm + eps) ** w["iv_percentile"]
         * (capital_eff_norm + eps) ** w["capital_efficiency"]
     )
     return round(score * 100, 1)
@@ -67,12 +77,14 @@ def build_recommendation(
     spare_capital_remaining: float,
     existing_exposure_by_symbol: dict,
     total_book: float = wc.TOTAL_BOOK,
+    iv_percentile: float | None = None,
 ) -> Recommendation:
     quality_norm = (profile.quality_score or 0) / 100.0
-    richness_norm = min((candidate.richness_ratio or 1.0) / wc.RICHNESS_OVERPRICED_RATIO, 1.5) / 1.5
+    # No IV history → neutral 0.5 so the name is neither rewarded nor sunk.
+    iv_pct_norm = iv_percentile / 100.0 if iv_percentile is not None else 0.5
     capital_eff = _capital_efficiency_score(candidate, spare_capital_remaining)
 
-    composite = _composite_rank(quality_norm, richness_norm, capital_eff)
+    composite = _composite_rank(quality_norm, iv_pct_norm, capital_eff)
 
     check = capital_check(
         proposed_capital_required=candidate.capital_required,
@@ -92,13 +104,18 @@ def build_recommendation(
         premium=candidate.premium,
         annualized_yield=candidate.annualized_yield,
         quality_score=profile.quality_score or 0.0,
-        richness_ratio=candidate.richness_ratio,
+        iv_percentile=iv_percentile,
         capital_efficiency_score=round(capital_eff * 100, 1),
         composite_rank=composite,
         capital_required=candidate.capital_required,
         contracts_suggested=contracts_suggested,
         capital_ok=check["ok"],
         capital_notes=check["reasons"],
+        bid=candidate.bid,
+        ask=candidate.ask,
+        quote_type=candidate.quote_type,
+        delta_is_estimated=candidate.delta_is_estimated,
+        open_interest=candidate.open_interest,
     )
 
 
@@ -109,6 +126,7 @@ def rank_recommendations(
     existing_exposure_by_symbol: dict,
     month_income_so_far: float = 0.0,
     total_book: float = wc.TOTAL_BOOK,
+    iv_percentile_by_symbol: dict | None = None,   # symbol -> 0-100 IV percentile vs own history
 ) -> list[Recommendation]:
     """Build and sort recommendations across every candidate for every
     fundamentally-passing symbol. Only the single best candidate per symbol
@@ -122,7 +140,10 @@ def rank_recommendations(
         if not candidates:
             continue
         best = candidates[0]
-        recs.append(build_recommendation(profile, best, spare_capital_remaining, existing_exposure_by_symbol, total_book=total_book))
+        recs.append(build_recommendation(
+            profile, best, spare_capital_remaining, existing_exposure_by_symbol, total_book=total_book,
+            iv_percentile=(iv_percentile_by_symbol or {}).get(symbol),
+        ))
 
     recs.sort(key=lambda r: r.composite_rank, reverse=True)
 

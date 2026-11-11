@@ -29,3 +29,17 @@ results/my_trades.csv
 # optionsdesk runtime DB
 optionsdesk.db
 optionsdesk.db-*
+
+# stock screener price/fundamentals cache
+stockscreen_cache/
+
+# premia research store and large artefacts (raw market data, backtest pickles, paper-trading logs)
+premia_data.db
+premia_data.db-*
+results/premia/cache/
+results/premia/runs/
+results/premia/paper/
+
+# optionsdesk live-account runtime DB (account data, never commit)
+optionsdesk_live.db
+optionsdesk_live.db-*

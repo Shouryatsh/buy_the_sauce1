@@ -1,0 +1,32 @@
+{
+ "phase": "phase7",
+ "verdict": "PASS",
+ "checks": [
+  {
+   "criterion": "every hard limit blocks",
+   "pass": true,
+   "evidence": "8 passed in 6.03s (4 tests)"
+  },
+  {
+   "criterion": "kill switch trips on daily loss and drawdown; blocks openings, not closings",
+   "pass": true,
+   "evidence": "2 passed in 6.25s (2 tests)"
+  },
+  {
+   "criterion": "executor refuses live ports and live accounts",
+   "pass": true,
+   "evidence": "2 passed in 5.69s (2 tests)"
+  },
+  {
+   "criterion": "end-to-end paper flow against a fake broker",
+   "pass": true,
+   "evidence": "3 passed in 7.05s (3 tests)"
+  },
+  {
+   "criterion": "daily report generated",
+   "pass": true,
+   "evidence": "1 passed in 5.60s (1 test)"
+  }
+ ],
+ "at": "2026-11-08T15:48:44"
+}

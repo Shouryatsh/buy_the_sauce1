@@ -1,0 +1,16 @@
+{
+ "kappa": 1.75,
+ "phi": 1.1,
+ "train": "2008-12-30..2012-12-31",
+ "n_train": 1008,
+ "oos_rmse_v93_volpts": 2.0637916962016294,
+ "oos_rmse_v93_flat_volpts": 2.545871014822913,
+ "oos_bias_v93_volpts": -1.3119100449717358,
+ "oos_bias_v93_low_iv_volpts": -1.1833892774617079,
+ "oos_bias_v93_low_iv_flat_volpts": -2.4989602354323828,
+ "oos_rmse_v183_volpts": 3.20180256910182,
+ "oos_rmse_v183_flat_volpts": 4.2976590755744,
+ "oos_bias_v183_volpts": -2.128503237574736,
+ "oos_bias_v183_low_iv_volpts": -1.8807182637814657,
+ "oos_bias_v183_low_iv_flat_volpts": -4.51455654645914
+}

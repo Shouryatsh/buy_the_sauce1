@@ -1,0 +1,23 @@
+{
+ "phase": "phase2",
+ "verdict": "PASS",
+ "checks": [
+  {
+   "criterion": "hard filters use only data filed on or before each date",
+   "pass": true,
+   "evidence": "latest quarter end <= as-of for every row; filings filtered by filed date (unit-tested)"
+  },
+  {
+   "criterion": "pass counts per filter per quarter reported",
+   "pass": true,
+   "evidence": "67 quarters in phase2_pass_counts.csv"
+  },
+  {
+   "criterion": "model-layer decision recorded (kept or dropped)",
+   "pass": true,
+   "evidence": "safety score DROPPED: mean IC 0.048 over 62 quarters, one-sided bootstrap p=0.977; all liquid members: mean IC 0.048, p=1.000"
+  }
+ ],
+ "at": "2026-11-08T09:35:10",
+ "score_kept": false
+}

@@ -1,0 +1,57 @@
+# Aurora glass theme for the wheel dashboard. Dark is the primary design;
+# light is a muted pastel variant (switch in the app's ⋮ → Settings menu).
+# Glass/blur/glow effects are layered on top in wheel_ui.inject_css().
+
+[theme]
+font = "Outfit:https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap"
+headingFont = "'Space Grotesk':https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+baseFontSize = 15
+headingFontWeights = [700, 600, 600, 600, 500, 500]
+headingFontSizes = ["34px", "26px", "20px", "17px", "15px", "13px"]
+baseRadius = "14px"
+buttonRadius = "10px"
+showWidgetBorder = true
+linkUnderline = false
+
+[theme.dark]
+primaryColor = "#7C3AED"
+backgroundColor = "#060A1A"
+secondaryBackgroundColor = "#11183A"
+textColor = "#E6EAF5"
+borderColor = "#26305C"
+linkColor = "#2DD4BF"
+codeBackgroundColor = "#0B1130"
+dataframeBorderColor = "#1F2850"
+dataframeHeaderBackgroundColor = "#0F1636"
+greenColor = "#34D399"
+redColor = "#FB7185"
+orangeColor = "#FBBF24"
+blueColor = "#38BDF8"
+violetColor = "#A78BFA"
+grayColor = "#8A93B8"
+chartCategoricalColors = ["#2DD4BF", "#A78BFA", "#F472B6", "#38BDF8", "#FBBF24", "#34D399", "#FB7185"]
+chartSequentialColors = ["#0B1A3A", "#123A5C", "#155E75", "#0F766E", "#14B8A6", "#2DD4BF", "#818CF8", "#A78BFA", "#E879F9", "#F472B6"]
+
+[theme.dark.sidebar]
+backgroundColor = "#080C20"
+secondaryBackgroundColor = "#11183A"
+textColor = "#E6EAF5"
+borderColor = "#26305C"
+
+[theme.light]
+primaryColor = "#6D28D9"
+backgroundColor = "#F4F6FB"
+secondaryBackgroundColor = "#E8ECF7"
+textColor = "#141A33"
+borderColor = "#CDD3EA"
+linkColor = "#0D9488"
+dataframeHeaderBackgroundColor = "#E8ECF7"
+greenColor = "#059669"
+redColor = "#E11D48"
+orangeColor = "#D97706"
+violetColor = "#7C3AED"
+chartCategoricalColors = ["#0D9488", "#7C3AED", "#DB2777", "#0284C7", "#D97706", "#059669", "#E11D48"]
+
+[theme.light.sidebar]
+backgroundColor = "#EEF1FA"
